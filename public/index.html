@@ -63,6 +63,7 @@ dialog::backdrop{background:rgba(0,0,0,.4)}
     <button data-view="new">+ New</button>
     <button data-view="items" id="navItems">Master Items</button>
     <button data-view="users" id="navUsers">Users</button>
+    <button data-view="audit" id="navAudit">Activity Log</button>
   </nav>
   <div class="userbox hidden" id="userbox"><span id="uinfo"></span><button class="btn sm" onclick="changePw()">Change password</button><button class="btn sm" onclick="logout()">Logout</button></div>
 </header>
@@ -144,9 +145,10 @@ async function boot(){
   $('#nav').classList.remove('hidden');$('#userbox').classList.remove('hidden');
   $('#uinfo').innerHTML=`${esc(me.name)} · <span class="tag ${me.role}">${me.role}</span> ${esc(me.department||'')}`;
   $('#navUsers').style.display=me.role==='ADMIN'?'':'none';
+  $('#navAudit').style.display=me.role==='ADMIN'?'':'none';
   document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{
     document.querySelectorAll('#nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active');
-    ({list:listView,new:()=>editorView(),items:itemsView,users:usersView})[b.dataset.view]();
+    ({list:listView,new:()=>editorView(),items:itemsView,users:usersView,audit:auditView})[b.dataset.view]();
   });
   listView();
 }
@@ -182,14 +184,24 @@ async function delQuant(id){if(confirm('Delete this quantification permanently?'
 
 // ---------- editor ----------
 let lines=[],editId=null,readOnly=false;
+function saveDraft(){
+  if(editId||readOnly)return;
+  try{localStorage.setItem('qf_draft',JSON.stringify({title:$('#qTitle')?.value??'',department:$('#qDept')?.value??'',gst_rate:$('#qGst')?.value??8,
+    checked_by:$('#qChk')?.value??'',checked_designation:$('#qChkD')?.value??'',approved_by:$('#qApp')?.value??'',approved_designation:$('#qAppD')?.value??'',lines}));}catch{}
+}
+function loadDraft(){try{return JSON.parse(localStorage.getItem('qf_draft'));}catch{return null;}}
+function clearDraft(){localStorage.removeItem('qf_draft');}
+function discardDraft(){if(confirm('Discard the unsaved quantification draft?')){clearDraft();editorView();}}
 async function editorView(id){
   editId=id||null;lines=[];readOnly=false;
   let q={title:'',department:me.department||DEPTS[3],gst_rate:8,checked_by:'',checked_designation:'',approved_by:'',approved_designation:''};
+  let hasDraft=false;
+  if(!id){const d=loadDraft();if(d){q=d;lines=(d.lines||[]).map(l=>({description:l.description,unit:l.unit,qty:l.qty,rate:l.rate}));hasDraft=true;}}
   if(id){q=await api('/quantifications/'+id);lines=q.lines.map(l=>({description:l.description,unit:l.unit,qty:l.qty,rate:l.rate}));readOnly=!q.can_edit;}
   if(!lines.length)lines.push({description:'',unit:'Nos',qty:'',rate:''});
   const ro=readOnly?'disabled':'';
   main.innerHTML=`<div class="card">
-    <h2>${id?(readOnly?'View':'Edit'):'New'} Quantification ${readOnly?'<span class="tag USER">read only</span>':''}</h2>
+    <h2>${id?(readOnly?'View':'Edit'):'New'} Quantification ${readOnly?'<span class="tag USER">read only</span>':''} ${hasDraft?'<span class="tag PENDING">draft resumed</span> <button class="btn sm danger" onclick="discardDraft()">Discard draft</button>':''}</h2>
     <div class="row2">
       <div><label>Title / Project</label><input id="qTitle" value="${esc(q.title)}" ${ro}></div>
       <div><label>Department</label><select id="qDept" ${ro}>${DEPTS.map(d=>`<option ${d===q.department?'selected':''}>${d}</option>`).join('')}</select></div>
@@ -216,9 +228,14 @@ async function editorView(id){
     <div class="err" id="qErr"></div>
   </div>`;
   renderLines();
+  if(!id&&!readOnly)['qTitle','qDept','qGst','qChk','qChkD','qApp','qAppD'].forEach(x=>$('#'+x)?.addEventListener('input',saveDraft));
 }
-function addLine(){lines.push({description:'',unit:'Nos',qty:'',rate:''});renderLines();}
-function rmLine(i){lines.splice(i,1);if(!lines.length)addLine();renderLines();}
+function addLine(){lines.push({description:'',unit:'Nos',qty:'',rate:''});renderLines();saveDraft();}
+function rmLine(i){
+  const l=lines[i];
+  if(l&&String(l.description||'').trim()&&!confirm('Remove line '+(i+1)+' ("'+l.description+'")?'))return;
+  lines.splice(i,1);if(!lines.length)lines.push({description:'',unit:'Nos',qty:'',rate:''});renderLines();saveDraft();
+}
 function renderLines(){
   const ro=readOnly?'disabled':'';
   $('#lineBody').innerHTML=lines.map((l,i)=>`<tr>
@@ -233,19 +250,24 @@ function renderLines(){
   document.querySelectorAll('#lineBody input').forEach(inp=>{
     inp.addEventListener('input',e=>{
       const i=+inp.dataset.i,f=inp.dataset.f;lines[i][f]=inp.value;
-      if(f==='description')showDD(inp,i);
-      $('#amt'+i).textContent=fmt((lines[i].qty||0)*(lines[i].rate||0));recalc();
+      if(f==='description')showDDDebounced(inp,i);
+      $('#amt'+i).textContent=fmt((lines[i].qty||0)*(lines[i].rate||0));recalc();saveDraft();
     });
     inp.addEventListener('keydown',ddKeys);
     inp.addEventListener('blur',()=>setTimeout(closeDD,180));
   });
   recalc();
 }
-let ddEl=null,ddItems=[],ddHl=-1,ddRow=-1;
+let ddEl=null,ddItems=[],ddHl=-1,ddRow=-1,ddTimer=null,ddSeq=0;
+function showDDDebounced(inp,i){clearTimeout(ddTimer);ddTimer=setTimeout(()=>showDD(inp,i),250);}
 async function showDD(inp,i){
-  const q=inp.value.trim();closeDD();
-  if(q.length<2)return;
-  ddItems=await api('/items?q='+encodeURIComponent(q));
+  const q=inp.value.trim();
+  if(q.length<2){closeDD();return;}
+  const seq=++ddSeq;
+  const results=await api('/items?q='+encodeURIComponent(q));
+  if(seq!==ddSeq)return; // a newer search superseded this one
+  closeDD();
+  ddItems=results;
   if(!ddItems.length)return;
   ddRow=i;ddHl=-1;
   ddEl=document.createElement('div');ddEl.className='dd-list';
@@ -263,7 +285,7 @@ function ddKeys(e){
 function hlDD(){ddEl.querySelectorAll('div[data-j]').forEach((d,j)=>d.classList.toggle('hl',j===ddHl));}
 function pickDD(j){
   const it=ddItems[j];lines[ddRow].description=it.name;lines[ddRow].unit=it.unit||'Nos';lines[ddRow].rate=it.price;
-  closeDD();renderLines();
+  closeDD();renderLines();saveDraft();
   const qtyInp=document.querySelector(`input[data-i="${ddRow}"][data-f="qty"]`);if(qtyInp)qtyInp.focus();
 }
 function closeDD(){if(ddEl){ddEl.remove();ddEl=null;}}
@@ -278,7 +300,7 @@ async function saveQuant(){
     approved_by:$('#qApp').value,approved_designation:$('#qAppD').value};
   try{
     if(editId)await api('/quantifications/'+editId,{method:'PUT',body:JSON.stringify(body)});
-    else await api('/quantifications',{method:'POST',body:JSON.stringify(body)});
+    else{await api('/quantifications',{method:'POST',body:JSON.stringify(body)});clearDraft();}
     listView();
   }catch(e){$('#qErr').textContent=e.message;}
 }
@@ -342,8 +364,22 @@ async function usersView(){
   </tbody></table></div>`;
 }
 async function updUser(id,field,val){
+  if(field==='status'&&val==='DISABLED'&&!confirm('Disable this user? They will no longer be able to log in.'))return usersView();
   try{await api('/admin/users/'+id,{method:'PUT',body:JSON.stringify({[field]:val})});usersView();}
   catch(e){alert(e.message);usersView();}
+}
+
+// ---------- admin activity log ----------
+async function auditView(){
+  const rows=await api('/admin/audit');
+  const label={ITEM_ADD:'Added item',ITEM_EDIT:'Edited item',ITEM_DELETE:'Deleted item',QUANT_DELETE:'Deleted quantification',USER_UPDATE:'Updated user'};
+  main.innerHTML=`<div class="card"><h2>Activity Log <span class="tag USER">master list &amp; admin actions</span></h2>
+  <div style="max-height:560px;overflow-y:auto"><table>
+  <thead><tr><th>Date &amp; Time (UTC)</th><th>User</th><th>Action</th><th>Details</th></tr></thead>
+  <tbody>${rows.map(r=>`<tr><td style="white-space:nowrap">${esc(r.created_at)}</td><td><b>${esc(r.user_name)}</b></td>
+    <td><span class="tag ${r.action.startsWith('ITEM')?'ADMIN':'USER'}">${esc(label[r.action]||r.action)}</span></td>
+    <td>${esc(r.details)}</td></tr>`).join('')||'<tr><td colspan="4" style="color:#999">No activity recorded yet.</td></tr>'}
+  </tbody></table></div></div>`;
 }
 
 boot();
