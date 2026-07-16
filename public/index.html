@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuantiFy — Development Services Division</title>
+<style>
+:root{--brand:#b5c827;--dark:#1f2937;--gray:#6b7280;--bg:#f3f4f6;--danger:#dc2626;--ok:#16a34a}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--dark)}
+header{background:var(--dark);color:#fff;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+header h1{font-size:20px}header h1 span{color:var(--brand)}
+header small{color:#9ca3af;display:block;font-size:11px}
+nav button{background:none;border:none;color:#d1d5db;padding:8px 14px;cursor:pointer;font-size:14px;border-radius:6px}
+nav button.active,nav button:hover{background:#374151;color:#fff}
+.userbox{font-size:13px;color:#d1d5db;display:flex;align-items:center;gap:10px}
+main{max-width:1050px;margin:24px auto;padding:0 16px}
+.card{background:#fff;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:24px;margin-bottom:20px}
+h2{font-size:18px;margin-bottom:16px}
+label{display:block;font-size:12px;font-weight:600;color:var(--gray);margin:10px 0 4px;text-transform:uppercase}
+input,select{width:100%;padding:9px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px}
+input:focus,select:focus{outline:2px solid var(--brand);border-color:var(--brand)}
+button.btn{background:var(--dark);color:#fff;border:none;padding:10px 18px;border-radius:6px;font-size:14px;cursor:pointer;margin-top:14px}
+button.btn:hover{opacity:.9}
+button.btn.brand{background:var(--brand);color:var(--dark);font-weight:700}
+button.btn.danger{background:var(--danger)}
+button.btn.sm{padding:5px 10px;font-size:12px;margin-top:0}
+.err{color:var(--danger);font-size:13px;margin-top:10px}.ok{color:var(--ok);font-size:13px;margin-top:10px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#e5e7eb;text-align:left;padding:8px;font-size:11px;text-transform:uppercase;color:#374151}
+td{padding:7px 8px;border-bottom:1px solid #e5e7eb;vertical-align:middle}
+tr:hover td{background:#f9fafb}
+.qtable input{padding:6px 8px;font-size:13px}
+.qtable td.num{text-align:right}
+.dd{position:relative}
+.dd-list{position:absolute;top:100%;left:0;right:0;background:#fff;border:1px solid #d1d5db;border-radius:0 0 6px 6px;max-height:220px;overflow-y:auto;z-index:50;box-shadow:0 4px 10px rgba(0,0,0,.15)}
+.dd-list div{padding:8px 10px;cursor:pointer;font-size:13px;display:flex;justify-content:space-between;gap:8px}
+.dd-list div:hover,.dd-list div.hl{background:var(--brand)}
+.dd-list small{color:var(--gray);white-space:nowrap}
+.totals{margin-top:14px;margin-left:auto;width:280px;font-size:14px}
+.totals div{display:flex;justify-content:space-between;padding:5px 0}
+.totals .grand{font-weight:700;border-top:2px solid var(--dark);font-size:16px}
+.tag{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600}
+.tag.ACTIVE{background:#dcfce7;color:#166534}.tag.PENDING{background:#fef9c3;color:#854d0e}.tag.DISABLED{background:#fee2e2;color:#991b1b}
+.tag.ADMIN{background:#ede9fe;color:#5b21b6}.tag.USER{background:#e0f2fe;color:#075985}
+.deptbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.deptbar button{background:#fff;border:1px solid #d1d5db;padding:8px 14px;border-radius:99px;cursor:pointer;font-size:13px}
+.deptbar button.active{background:var(--dark);color:#fff;border-color:var(--dark)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:640px){.row2{grid-template-columns:1fr}}
+footer{text-align:center;color:var(--gray);font-size:12px;padding:20px}
+dialog{border:none;border-radius:10px;padding:24px;max-width:480px;box-shadow:0 10px 40px rgba(0,0,0,.3)}
+dialog::backdrop{background:rgba(0,0,0,.4)}
+.hidden{display:none}
+.actions{display:flex;gap:6px}
+</style>
+</head>
+<body>
+<header>
+  <div><h1>Quanti<span>Fy</span></h1><small>DEVELOPMENT SERVICES DIVISION · FDC</small></div>
+  <nav id="nav" class="hidden">
+    <button data-view="list" class="active">Quantifications</button>
+    <button data-view="new">+ New</button>
+    <button data-view="items" id="navItems">Master Items</button>
+    <button data-view="users" id="navUsers">Users</button>
+  </nav>
+  <div class="userbox hidden" id="userbox"><span id="uinfo"></span><button class="btn sm" onclick="changePw()">Change password</button><button class="btn sm" onclick="logout()">Logout</button></div>
+</header>
+<main id="main"></main>
+<footer>QuantiFy · designed and created by <b>necromenxer</b></footer>
+
+<dialog id="dupDlg">
+  <h2>Possible duplicate</h2>
+  <p style="font-size:13px;margin-bottom:10px">Similar items already exist in the master list:</p>
+  <div id="dupList" style="font-size:13px;max-height:200px;overflow-y:auto;margin-bottom:14px"></div>
+  <button class="btn danger sm" onclick="dupDlg.close('cancel')">Don't add</button>
+  <button class="btn brand sm" onclick="dupDlg.close('force')">Add anyway</button>
+</dialog>
+
+<script>
+const $=s=>document.querySelector(s);
+const main=$('#main'), dupDlg=$('#dupDlg');
+let token=localStorage.getItem('qf_token'), me=null, DEPTS=[];
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=n=>Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+async function api(path,opts={}){
+  opts.headers=Object.assign({'Content-Type':'application/json'},opts.headers);
+  if(token)opts.headers.Authorization='Bearer '+token;
+  const r=await fetch('/api'+path,opts);
+  if(r.status===401&&me){logout();throw new Error('Session expired');}
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok){const e=new Error(data.error||data.message||'Request failed');e.data=data;e.status=r.status;throw e;}
+  return data;
+}
+
+// ---------- auth views ----------
+function loginView(msg){
+  $('#nav').classList.add('hidden');$('#userbox').classList.add('hidden');
+  main.innerHTML=`<div class="card" style="max-width:420px;margin:40px auto">
+    <h2>Sign in</h2>
+    <label>Work Email / Username</label><input id="lEmail" placeholder="user@fdc.mv">
+    <label>Password</label><input id="lPass" type="password">
+    <button class="btn brand" onclick="doLogin()">Login</button>
+    <div class="err" id="lErr">${esc(msg||'')}</div>
+    <p style="margin-top:16px;font-size:13px">No account? <a href="#" onclick="registerView();return false">Register with your @fdc.mv email</a></p>
+  </div>`;
+  $('#lPass').addEventListener('keydown',e=>e.key==='Enter'&&doLogin());
+}
+function registerView(){
+  main.innerHTML=`<div class="card" style="max-width:420px;margin:40px auto">
+    <h2>Register</h2>
+    <label>Full Name</label><input id="rName">
+    <label>Work Email (@fdc.mv)</label><input id="rEmail" placeholder="user@fdc.mv">
+    <label>Password</label><input id="rPass" type="password">
+    <button class="btn brand" onclick="doRegister()">Register</button>
+    <div class="err" id="rErr"></div>
+    <p style="margin-top:16px;font-size:13px"><a href="#" onclick="loginView();return false">Back to login</a></p>
+  </div>`;
+}
+async function doLogin(){
+  try{const d=await api('/login',{method:'POST',body:JSON.stringify({email:$('#lEmail').value,password:$('#lPass').value})});
+    token=d.token;localStorage.setItem('qf_token',token);me=d.user;boot();
+  }catch(e){$('#lErr').textContent=e.message;}
+}
+async function doRegister(){
+  try{const d=await api('/register',{method:'POST',body:JSON.stringify({name:$('#rName').value,email:$('#rEmail').value,password:$('#rPass').value})});
+    loginView(d.message);$('#lErr').className='ok';
+  }catch(e){$('#rErr').textContent=e.message;}
+}
+function logout(){token=null;me=null;localStorage.removeItem('qf_token');loginView();}
+async function changePw(){
+  const current=prompt('Current password:');if(current===null)return;
+  const next=prompt('New password (min 6 characters):');if(next===null)return;
+  try{await api('/me/password',{method:'POST',body:JSON.stringify({current,next})});alert('Password changed.');}
+  catch(e){alert(e.message);}
+}
+
+// ---------- shell ----------
+async function boot(){
+  DEPTS=await api('/departments');
+  if(token&&!me){try{me=await api('/me');}catch{logout();return;}}
+  if(!me)return loginView();
+  $('#nav').classList.remove('hidden');$('#userbox').classList.remove('hidden');
+  $('#uinfo').innerHTML=`${esc(me.name)} · <span class="tag ${me.role}">${me.role}</span> ${esc(me.department||'')}`;
+  $('#navUsers').style.display=me.role==='ADMIN'?'':'none';
+  document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{
+    document.querySelectorAll('#nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active');
+    ({list:listView,new:()=>editorView(),items:itemsView,users:usersView})[b.dataset.view]();
+  });
+  listView();
+}
+
+// ---------- quantification list ----------
+let curDept='';
+async function listView(){
+  const rows=await api('/quantifications'+(curDept?'?department='+encodeURIComponent(curDept):''));
+  main.innerHTML=`<div class="deptbar">
+    <button class="${curDept===''?'active':''}" onclick="curDept='';listView()">All Departments</button>
+    ${DEPTS.map(d=>`<button class="${curDept===d?'active':''}" onclick="curDept='${d}';listView()">${d}</button>`).join('')}
+  </div>
+  <div class="card"><h2>Quantifications ${curDept?'— '+esc(curDept):''}</h2>
+  <table><thead><tr><th>Title</th><th>Department</th><th>By</th><th>Updated</th><th style="text-align:right">Grand Total</th><th></th></tr></thead>
+  <tbody>${rows.map(q=>{
+    const grand=(q.subtotal||0)*(1+(q.gst_rate||0)/100);
+    const mine=q.created_by===me.id||me.role==='ADMIN';
+    return `<tr><td><b>${esc(q.title)}</b></td><td>${esc(q.department)}</td><td>${esc(q.creator_name)}</td>
+    <td>${q.updated_at.slice(0,10)}</td><td style="text-align:right">${fmt(grand)}</td>
+    <td class="actions">
+      <button class="btn sm" onclick="editorView(${q.id})">${mine?'Edit':'View'}</button>
+      <button class="btn sm brand" onclick="dlPdf(${q.id})">PDF</button>
+      ${me.role==='ADMIN'?`<button class="btn sm danger" onclick="delQuant(${q.id})">Del</button>`:''}
+    </td></tr>`;}).join('')||'<tr><td colspan="6" style="color:#999">No quantifications yet.</td></tr>'}
+  </tbody></table></div>`;
+}
+async function dlPdf(id){
+  const r=await fetch('/api/quantifications/'+id+'/pdf',{headers:{Authorization:'Bearer '+token}});
+  const blob=await r.blob();const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);a.download='Quantification-'+id+'.pdf';a.click();
+}
+async function delQuant(id){if(confirm('Delete this quantification permanently?')){await api('/quantifications/'+id,{method:'DELETE'});listView();}}
+
+// ---------- editor ----------
+let lines=[],editId=null,readOnly=false;
+async function editorView(id){
+  editId=id||null;lines=[];readOnly=false;
+  let q={title:'',department:me.department||DEPTS[3],gst_rate:8,checked_by:'',checked_designation:'',approved_by:'',approved_designation:''};
+  if(id){q=await api('/quantifications/'+id);lines=q.lines.map(l=>({description:l.description,unit:l.unit,qty:l.qty,rate:l.rate}));readOnly=!q.can_edit;}
+  if(!lines.length)lines.push({description:'',unit:'Nos',qty:'',rate:''});
+  const ro=readOnly?'disabled':'';
+  main.innerHTML=`<div class="card">
+    <h2>${id?(readOnly?'View':'Edit'):'New'} Quantification ${readOnly?'<span class="tag USER">read only</span>':''}</h2>
+    <div class="row2">
+      <div><label>Title / Project</label><input id="qTitle" value="${esc(q.title)}" ${ro}></div>
+      <div><label>Department</label><select id="qDept" ${ro}>${DEPTS.map(d=>`<option ${d===q.department?'selected':''}>${d}</option>`).join('')}</select></div>
+    </div>
+    <div style="margin-top:16px;overflow-x:auto"><table class="qtable" id="lineTable">
+      <thead><tr><th style="width:30px">#</th><th>Description (type to search master list)</th><th style="width:80px">Unit</th><th style="width:80px">QTY</th><th style="width:90px">Rate</th><th style="width:100px;text-align:right">Amount</th><th style="width:34px"></th></tr></thead>
+      <tbody id="lineBody"></tbody>
+    </table></div>
+    ${readOnly?'':'<button class="btn sm" onclick="addLine()">+ Add line</button>'}
+    <div class="totals">
+      <div><span>Total</span><b id="tSub">0.00</b></div>
+      <div><span>GST <input id="qGst" type="number" step="0.1" value="${q.gst_rate}" style="width:60px;display:inline;padding:3px" ${ro} oninput="recalc()">%</span><b id="tGst">0.00</b></div>
+      <div class="grand"><span>Grand Total</span><b id="tGrand">0.00</b></div>
+    </div>
+    <h2 style="margin-top:20px">Sign-off</h2>
+    <div class="row2">
+      <div><label>Checked By — Name</label><input id="qChk" value="${esc(q.checked_by)}" ${ro}>
+        <label>Checked By — Designation</label><input id="qChkD" value="${esc(q.checked_designation)}" ${ro}></div>
+      <div><label>Approved By — Name</label><input id="qApp" value="${esc(q.approved_by)}" ${ro}>
+        <label>Approved By — Designation</label><input id="qAppD" value="${esc(q.approved_designation)}" ${ro}></div>
+    </div>
+    ${readOnly?'':`<button class="btn brand" onclick="saveQuant()">${id?'Save changes':'Create quantification'}</button>`}
+    ${id?`<button class="btn" onclick="dlPdf(${id})">Download PDF</button>`:''}
+    <div class="err" id="qErr"></div>
+  </div>`;
+  renderLines();
+}
+function addLine(){lines.push({description:'',unit:'Nos',qty:'',rate:''});renderLines();}
+function rmLine(i){lines.splice(i,1);if(!lines.length)addLine();renderLines();}
+function renderLines(){
+  const ro=readOnly?'disabled':'';
+  $('#lineBody').innerHTML=lines.map((l,i)=>`<tr>
+    <td>${i+1}</td>
+    <td class="dd"><input data-i="${i}" data-f="description" value="${esc(l.description)}" autocomplete="off" ${ro}></td>
+    <td><input data-i="${i}" data-f="unit" value="${esc(l.unit)}" ${ro}></td>
+    <td><input data-i="${i}" data-f="qty" type="number" step="any" value="${esc(l.qty)}" ${ro}></td>
+    <td><input data-i="${i}" data-f="rate" type="number" step="any" value="${esc(l.rate)}" ${ro}></td>
+    <td class="num" id="amt${i}">${fmt((l.qty||0)*(l.rate||0))}</td>
+    <td>${readOnly?'':`<button class="btn sm danger" onclick="rmLine(${i})">×</button>`}</td>
+  </tr>`).join('');
+  document.querySelectorAll('#lineBody input').forEach(inp=>{
+    inp.addEventListener('input',e=>{
+      const i=+inp.dataset.i,f=inp.dataset.f;lines[i][f]=inp.value;
+      if(f==='description')showDD(inp,i);
+      $('#amt'+i).textContent=fmt((lines[i].qty||0)*(lines[i].rate||0));recalc();
+    });
+    inp.addEventListener('keydown',ddKeys);
+    inp.addEventListener('blur',()=>setTimeout(closeDD,180));
+  });
+  recalc();
+}
+let ddEl=null,ddItems=[],ddHl=-1,ddRow=-1;
+async function showDD(inp,i){
+  const q=inp.value.trim();closeDD();
+  if(q.length<2)return;
+  ddItems=await api('/items?q='+encodeURIComponent(q));
+  if(!ddItems.length)return;
+  ddRow=i;ddHl=-1;
+  ddEl=document.createElement('div');ddEl.className='dd-list';
+  ddEl.innerHTML=ddItems.map((it,j)=>`<div data-j="${j}"><span>${esc(it.name)}</span><small>${esc(it.unit)} · ${fmt(it.price)}</small></div>`).join('');
+  ddEl.querySelectorAll('div[data-j]').forEach(d=>d.addEventListener('mousedown',e=>{e.preventDefault();pickDD(+d.dataset.j);}));
+  inp.parentElement.appendChild(ddEl);
+}
+function ddKeys(e){
+  if(!ddEl)return;
+  if(e.key==='ArrowDown'){ddHl=Math.min(ddHl+1,ddItems.length-1);hlDD();e.preventDefault();}
+  else if(e.key==='ArrowUp'){ddHl=Math.max(ddHl-1,0);hlDD();e.preventDefault();}
+  else if(e.key==='Enter'&&ddHl>=0){pickDD(ddHl);e.preventDefault();}
+  else if(e.key==='Escape')closeDD();
+}
+function hlDD(){ddEl.querySelectorAll('div[data-j]').forEach((d,j)=>d.classList.toggle('hl',j===ddHl));}
+function pickDD(j){
+  const it=ddItems[j];lines[ddRow].description=it.name;lines[ddRow].unit=it.unit||'Nos';lines[ddRow].rate=it.price;
+  closeDD();renderLines();
+  const qtyInp=document.querySelector(`input[data-i="${ddRow}"][data-f="qty"]`);if(qtyInp)qtyInp.focus();
+}
+function closeDD(){if(ddEl){ddEl.remove();ddEl=null;}}
+function recalc(){
+  const sub=lines.reduce((s,l)=>s+(Number(l.qty)||0)*(Number(l.rate)||0),0);
+  const gst=sub*(Number($('#qGst')?.value)||0)/100;
+  $('#tSub').textContent=fmt(sub);$('#tGst').textContent=fmt(gst);$('#tGrand').textContent=fmt(sub+gst);
+}
+async function saveQuant(){
+  const body={title:$('#qTitle').value,department:$('#qDept').value,gst_rate:Number($('#qGst').value),
+    lines,checked_by:$('#qChk').value,checked_designation:$('#qChkD').value,
+    approved_by:$('#qApp').value,approved_designation:$('#qAppD').value};
+  try{
+    if(editId)await api('/quantifications/'+editId,{method:'PUT',body:JSON.stringify(body)});
+    else await api('/quantifications',{method:'POST',body:JSON.stringify(body)});
+    listView();
+  }catch(e){$('#qErr').textContent=e.message;}
+}
+
+// ---------- master items ----------
+async function itemsView(filter=''){
+  const items=await api('/items'+(filter?'?q='+encodeURIComponent(filter):''));
+  const admin=me.role==='ADMIN';
+  main.innerHTML=`<div class="card"><h2>Master Item List (${items.length}${filter?' shown':''})</h2>
+    ${admin?`<div class="row2" style="align-items:end">
+      <div><label>New Item Name</label><input id="niName"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end">
+        <div><label>Unit</label><input id="niUnit" value="Nos"></div>
+        <div><label>Price</label><input id="niPrice" type="number" step="any"></div>
+        <button class="btn brand" onclick="addItem(false)">Add</button>
+      </div></div><div class="err" id="niErr"></div><hr style="margin:16px 0;border:none;border-top:1px solid #e5e7eb">`:''}
+    <label>Search</label><input id="itSearch" value="${esc(filter)}" placeholder="Type to filter...">
+    <div style="margin-top:12px;max-height:480px;overflow-y:auto"><table>
+      <thead><tr><th>#</th><th>Item Name</th><th>Unit</th><th style="text-align:right">Price</th>${admin?'<th></th>':''}</tr></thead>
+      <tbody>${items.map((it,i)=>`<tr><td>${i+1}</td><td>${esc(it.name)}</td><td>${esc(it.unit)}</td>
+        <td style="text-align:right">${fmt(it.price)}</td>
+        ${admin?`<td class="actions"><button class="btn sm" onclick="editItem(${it.id},'${esc(it.name).replace(/'/g,"\\'")}','${esc(it.unit)}',${it.price})">Edit</button>
+        <button class="btn sm danger" onclick="delItem(${it.id})">Del</button></td>`:''}</tr>`).join('')}
+      </tbody></table></div></div>`;
+  let t;$('#itSearch').addEventListener('input',e=>{clearTimeout(t);t=setTimeout(()=>itemsView(e.target.value),300);});
+}
+async function addItem(force){
+  try{
+    await api('/items',{method:'POST',body:JSON.stringify({name:$('#niName').value,unit:$('#niUnit').value,price:$('#niPrice').value,force})});
+    itemsView();
+  }catch(e){
+    if(e.status===409){
+      $('#dupList').innerHTML=e.data.duplicates.map(d=>`<div style="padding:4px 0;border-bottom:1px solid #eee">${esc(d.name)} — ${esc(d.unit)} · ${fmt(d.price)}</div>`).join('');
+      dupDlg.showModal();
+      dupDlg.onclose=()=>{if(dupDlg.returnValue==='force')addItem(true);};
+    }else $('#niErr').textContent=e.message;
+  }
+}
+async function editItem(id,name,unit,price){
+  const n=prompt('Item name:',name);if(n===null)return;
+  const u=prompt('Unit:',unit);if(u===null)return;
+  const p=prompt('Price:',price);if(p===null||isNaN(p))return;
+  await api('/items/'+id,{method:'PUT',body:JSON.stringify({name:n,unit:u,price:Number(p)})});itemsView();
+}
+async function delItem(id){if(confirm('Remove this item from the master list?')){await api('/items/'+id,{method:'DELETE'});itemsView();}}
+
+// ---------- admin users ----------
+async function usersView(){
+  const users=await api('/admin/users');
+  main.innerHTML=`<div class="card"><h2>User Management</h2>
+  <table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Department</th><th>Status</th><th></th></tr></thead>
+  <tbody>${users.map(u=>`<tr>
+    <td><b>${esc(u.name)}</b></td><td>${esc(u.email)}</td>
+    <td><select onchange="updUser(${u.id},'role',this.value)"><option ${u.role==='USER'?'selected':''}>USER</option><option ${u.role==='ADMIN'?'selected':''}>ADMIN</option></select></td>
+    <td><select onchange="updUser(${u.id},'department',this.value)"><option value="">—</option>${DEPTS.map(d=>`<option ${u.department===d?'selected':''}>${d}</option>`).join('')}</select></td>
+    <td><span class="tag ${u.status}">${u.status}</span></td>
+    <td class="actions">
+      ${u.status!=='ACTIVE'?`<button class="btn sm brand" onclick="updUser(${u.id},'status','ACTIVE')">Approve</button>`:''}
+      ${u.statu
