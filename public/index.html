@@ -170,7 +170,7 @@ async function settingsView(){
     </div>
     <div>
       <div class="card"><h2>Digital Signature</h2>
-        <p style="font-size:13px;color:var(--gray);margin-bottom:10px">Upload your signature as a PNG (transparent background works best). It is printed automatically under "Prepared By" on PDFs of quantifications you create.</p>
+        <p style="font-size:13px;color:var(--gray);margin-bottom:10px">Upload your signature as a PNG, up to 1MB (transparent background works best). It is printed automatically under "Prepared By" on PDFs of quantifications you create.</p>
         <div class="sigbox" id="sigBox">${me.signature?`<img src="${me.signature}" alt="signature">`:'<span style="color:var(--gray);font-size:13px">No signature uploaded</span>'}</div>
         <input type="file" id="sigFile" accept="image/png" style="margin-top:10px">
         <div style="display:flex;gap:8px">
@@ -199,7 +199,7 @@ async function settingsView(){
   $('#sigFile').addEventListener('change',e=>{
     const f=e.target.files[0];if(!f)return;
     if(f.type!=='image/png'){$('#sigMsg').textContent='Please choose a PNG file.';return;}
-    if(f.size>300000){$('#sigMsg').textContent='File too large (max 300KB).';return;}
+    if(f.size>1048576){$('#sigMsg').textContent='File too large (max 1MB).';return;}
     const rd=new FileReader();
     rd.onload=()=>{sigData=rd.result;$('#sigBox').innerHTML=`<img src="${sigData}" alt="signature preview">`;$('#sigMsg').textContent='';};
     rd.readAsDataURL(f);
