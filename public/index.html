@@ -61,11 +61,11 @@ dialog::backdrop{background:rgba(0,0,0,.4)}
   <nav id="nav" class="hidden">
     <button data-view="list" class="active">Quantifications</button>
     <button data-view="new">+ New</button>
-    <button data-view="items" id="navItems">Master Items</button>
+    <button data-view="items" id="navItems">Items</button>
     <button data-view="users" id="navUsers">Users</button>
     <button data-view="audit" id="navAudit">Activity Log</button>
   </nav>
-  <div class="userbox hidden" id="userbox"><span id="uinfo"></span><button class="btn sm" onclick="changePw()">Change password</button><button class="btn sm" onclick="logout()">Logout</button></div>
+  <div class="userbox hidden" id="userbox"><span id="uinfo"></span><button class="btn sm" onclick="settings()">Settings</button><button class="btn sm" onclick="changePw()">Change password</button><button class="btn sm" onclick="logout()">Logout</button></div>
 </header>
 <main id="main"></main>
 <footer>QuantiFy · designed and created by <b>necromenxer</b></footer>
@@ -130,6 +130,12 @@ async function doRegister(){
   }catch(e){$('#rErr').textContent=e.message;}
 }
 function logout(){token=null;me=null;localStorage.removeItem('qf_token');loginView();}
+async function settings(){
+  const d=prompt('Your designation (appears in the Prepared By box on PDFs):',me.designation||'');
+  if(d===null)return;
+  try{await api('/me/profile',{method:'PUT',body:JSON.stringify({designation:d})});me.designation=d.trim();alert('Designation saved.');}
+  catch(e){alert(e.message);}
+}
 async function changePw(){
   const current=prompt('Current password:');if(current===null)return;
   const next=prompt('New password (min 6 characters):');if(next===null)return;
@@ -178,7 +184,9 @@ async function listView(){
 async function dlPdf(id){
   const r=await fetch('/api/quantifications/'+id+'/pdf',{headers:{Authorization:'Bearer '+token}});
   const blob=await r.blob();const a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);a.download='Quantification-'+id+'.pdf';a.click();
+  const cd=r.headers.get('Content-Disposition')||'';
+  const m=cd.match(/filename="([^"]+)"/);
+  a.href=URL.createObjectURL(blob);a.download=m?m[1]:'Quantification-'+id+'.pdf';a.click();
 }
 async function delQuant(id){if(confirm('Delete this quantification permanently?')){await api('/quantifications/'+id,{method:'DELETE'});listView();}}
 
@@ -194,7 +202,7 @@ function clearDraft(){localStorage.removeItem('qf_draft');}
 function discardDraft(){if(confirm('Discard the unsaved quantification draft?')){clearDraft();editorView();}}
 async function editorView(id){
   editId=id||null;lines=[];readOnly=false;
-  let q={title:'',department:me.department||DEPTS[3],gst_rate:8,checked_by:'',checked_designation:'',approved_by:'',approved_designation:''};
+  let q={title:'',department:me.department||DEPTS[3],gst_rate:8,checked_by:me.name,checked_designation:me.designation||'',approved_by:'',approved_designation:''};
   let hasDraft=false;
   if(!id){const d=loadDraft();if(d){q=d;lines=(d.lines||[]).map(l=>({description:l.description,unit:l.unit,qty:l.qty,rate:l.rate}));hasDraft=true;}}
   if(id){q=await api('/quantifications/'+id);lines=q.lines.map(l=>({description:l.description,unit:l.unit,qty:l.qty,rate:l.rate}));readOnly=!q.can_edit;}
@@ -218,8 +226,8 @@ async function editorView(id){
     </div>
     <h2 style="margin-top:20px">Sign-off</h2>
     <div class="row2">
-      <div><label>Checked By — Name</label><input id="qChk" value="${esc(q.checked_by)}" ${ro}>
-        <label>Checked By — Designation</label><input id="qChkD" value="${esc(q.checked_designation)}" ${ro}></div>
+      <div><label>Prepared By — Name</label><input id="qChk" value="${esc(q.checked_by)}" ${ro}>
+        <label>Prepared By — Designation</label><input id="qChkD" value="${esc(q.checked_designation)}" ${ro}></div>
       <div><label>Approved By — Name</label><input id="qApp" value="${esc(q.approved_by)}" ${ro}>
         <label>Approved By — Designation</label><input id="qAppD" value="${esc(q.approved_designation)}" ${ro}></div>
     </div>
@@ -318,7 +326,7 @@ async function saveQuant(){
 async function itemsView(filter=''){
   const items=await api('/items'+(filter?'?q='+encodeURIComponent(filter):''));
   const admin=me.role==='ADMIN';
-  main.innerHTML=`<div class="card"><h2>Master Item List (${items.length}${filter?' shown':''})</h2>
+  main.innerHTML=`<div class="card"><h2>Items (${items.length}${filter?' shown':''})</h2>
     ${admin?`<div class="row2" style="align-items:end">
       <div><label>New Item Name</label><input id="niName"></div>
       <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end">
@@ -360,17 +368,17 @@ async function delItem(id){if(confirm('Remove this item from the master list?'))
 async function usersView(){
   const users=await api('/admin/users');
   main.innerHTML=`<div class="card"><h2>User Management</h2>
-  <table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Department</th><th>Status</th><th></th></tr></thead>
+  <div style="overflow-x:auto"><table style="min-width:820px"><thead><tr><th>Name</th><th>Email</th><th style="width:110px">Role</th><th style="width:200px">Department</th><th style="width:80px">Status</th><th style="width:100px"></th></tr></thead>
   <tbody>${users.map(u=>`<tr>
     <td><b>${esc(u.name)}</b></td><td>${esc(u.email)}</td>
-    <td><select onchange="updUser(${u.id},'role',this.value)"><option ${u.role==='USER'?'selected':''}>USER</option><option ${u.role==='ADMIN'?'selected':''}>ADMIN</option></select></td>
-    <td><select onchange="updUser(${u.id},'department',this.value)"><option value="">—</option>${DEPTS.map(d=>`<option ${u.department===d?'selected':''}>${d}</option>`).join('')}</select></td>
+    <td><select style="width:100px" onchange="updUser(${u.id},'role',this.value)"><option ${u.role==='USER'?'selected':''}>USER</option><option ${u.role==='ADMIN'?'selected':''}>ADMIN</option></select></td>
+    <td><select style="width:190px" onchange="updUser(${u.id},'department',this.value)"><option value="">—</option>${DEPTS.map(d=>`<option ${u.department===d?'selected':''}>${d}</option>`).join('')}</select></td>
     <td><span class="tag ${u.status}">${u.status}</span></td>
-    <td class="actions">
+    <td><div class="actions" style="white-space:nowrap">
       ${u.status!=='ACTIVE'?`<button class="btn sm brand" onclick="updUser(${u.id},'status','ACTIVE')">Approve</button>`:''}
       ${u.status==='ACTIVE'&&u.id!==me.id?`<button class="btn sm danger" onclick="updUser(${u.id},'status','DISABLED')">Disable</button>`:''}
-    </td></tr>`).join('')}
-  </tbody></table></div>`;
+    </div></td></tr>`).join('')}
+  </tbody></table></div></div>`;
 }
 async function updUser(id,field,val){
   if(field==='status'&&val==='DISABLED'&&!confirm('Disable this user? They will no longer be able to log in.'))return usersView();
