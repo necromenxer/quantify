@@ -337,4 +337,16 @@ async function usersView(){
     <td><span class="tag ${u.status}">${u.status}</span></td>
     <td class="actions">
       ${u.status!=='ACTIVE'?`<button class="btn sm brand" onclick="updUser(${u.id},'status','ACTIVE')">Approve</button>`:''}
-      ${u.statu
+      ${u.status==='ACTIVE'&&u.id!==me.id?`<button class="btn sm danger" onclick="updUser(${u.id},'status','DISABLED')">Disable</button>`:''}
+    </td></tr>`).join('')}
+  </tbody></table></div>`;
+}
+async function updUser(id,field,val){
+  try{await api('/admin/users/'+id,{method:'PUT',body:JSON.stringify({[field]:val})});usersView();}
+  catch(e){alert(e.message);usersView();}
+}
+
+boot();
+</script>
+</body>
+</html>
