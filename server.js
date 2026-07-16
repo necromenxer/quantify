@@ -70,7 +70,7 @@ app.put('/api/me/profile', auth, wrap(async (req, res) => {
   if (name !== undefined && !String(name).trim()) return res.status(400).json({ error: 'Name cannot be empty' });
   if (signature !== undefined && signature !== null && signature !== '') {
     if (!String(signature).startsWith('data:image/png;base64,')) return res.status(400).json({ error: 'Signature must be a PNG image' });
-    if (String(signature).length > 500000) return res.status(400).json({ error: 'Signature image too large (max ~350KB)' });
+    if (String(signature).length > 1500000) return res.status(400).json({ error: 'Signature image too large (max 1MB)' });
   }
   await db.run(`UPDATE users SET name = COALESCE(?, name), designation = COALESCE(?, designation),
                 phone = COALESCE(?, phone), dob = COALESCE(?, dob), signature = COALESCE(?, signature) WHERE id = ?`,
