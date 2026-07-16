@@ -53,6 +53,24 @@ dialog{border:none;border-radius:10px;padding:24px;max-width:480px;box-shadow:0 
 dialog::backdrop{background:rgba(0,0,0,.4)}
 .hidden{display:none}
 .actions{display:flex;gap:6px}
+.setgrid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:760px){.setgrid{grid-template-columns:1fr}}
+.sigbox{border:1px dashed #d1d5db;border-radius:8px;padding:14px;text-align:center;background:#fafafa}
+.sigbox img{max-height:70px;max-width:100%;background:#fff;border:1px solid #eee;padding:4px;border-radius:4px}
+body.dark{--bg:#0f172a;--dark:#e5e7eb;--gray:#94a3b8;color:#e5e7eb}
+body.dark .card{background:#1e293b;box-shadow:0 1px 3px rgba(0,0,0,.5)}
+body.dark input,body.dark select{background:#0f172a;color:#e5e7eb;border-color:#334155}
+body.dark th{background:#334155;color:#cbd5e1}
+body.dark td{border-color:#334155}
+body.dark tr:hover td{background:#273449}
+body.dark .deptbar button{background:#1e293b;color:#e5e7eb;border-color:#334155}
+body.dark .deptbar button.active{background:#b5c827;color:#111}
+body.dark button.btn{background:#334155;color:#e5e7eb}
+body.dark button.btn.brand{background:var(--brand);color:#111}
+body.dark button.btn.danger{background:var(--danger);color:#fff}
+body.dark .dd-list{background:#1e293b;border-color:#334155;color:#e5e7eb}
+body.dark .sigbox{background:#0f172a;border-color:#334155}
+body.dark .totals .grand{border-color:#e5e7eb}
 </style>
 </head>
 <body>
@@ -64,8 +82,9 @@ dialog::backdrop{background:rgba(0,0,0,.4)}
     <button data-view="items" id="navItems">Items</button>
     <button data-view="users" id="navUsers">Users</button>
     <button data-view="audit" id="navAudit">Activity Log</button>
+    <button data-view="settings">Settings</button>
   </nav>
-  <div class="userbox hidden" id="userbox"><span id="uinfo"></span><button class="btn sm" onclick="settings()">Settings</button><button class="btn sm" onclick="changePw()">Change password</button><button class="btn sm" onclick="logout()">Logout</button></div>
+  <div class="userbox hidden" id="userbox"><span id="uinfo"></span><button class="btn sm" onclick="logout()">Logout</button></div>
 </header>
 <main id="main"></main>
 <footer>QuantiFy · designed and created by <b>necromenxer</b></footer>
@@ -82,6 +101,7 @@ dialog::backdrop{background:rgba(0,0,0,.4)}
 const $=s=>document.querySelector(s);
 const main=$('#main'), dupDlg=$('#dupDlg');
 let token=localStorage.getItem('qf_token'), me=null, DEPTS=[];
+if(localStorage.getItem('qf_theme')==='dark')document.body.classList.add('dark');
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=n=>Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 
@@ -130,17 +150,90 @@ async function doRegister(){
   }catch(e){$('#rErr').textContent=e.message;}
 }
 function logout(){token=null;me=null;localStorage.removeItem('qf_token');loginView();}
-async function settings(){
-  const d=prompt('Your designation (appears in the Prepared By box on PDFs):',me.designation||'');
-  if(d===null)return;
-  try{await api('/me/profile',{method:'PUT',body:JSON.stringify({designation:d})});me.designation=d.trim();alert('Designation saved.');}
-  catch(e){alert(e.message);}
+// ---------- settings page ----------
+let sigData;
+async function settingsView(){
+  me=await api('/me');
+  sigData=undefined;
+  main.innerHTML=`
+  <div class="setgrid">
+    <div class="card"><h2>User Info</h2>
+      <label>Full Name</label><input id="sName" value="${esc(me.name)}">
+      <label>Email / Username</label><input value="${esc(me.email)}" disabled>
+      <label>Department</label><input value="${esc(me.department||'Not assigned')}" disabled>
+      <label>Role</label><input value="${esc(me.role)}" disabled>
+      <label>Designation</label><input id="sDesig" value="${esc(me.designation||'')}" placeholder="e.g. Technical Officer">
+      <label>Contact Number</label><input id="sPhone" value="${esc(me.phone||'')}" placeholder="+960 ...">
+      <label>Date of Birth</label><input id="sDob" type="date" value="${esc(me.dob||'')}">
+      <button class="btn brand" onclick="saveProfile()">Save profile</button>
+      <div class="ok" id="sMsg"></div>
+    </div>
+    <div>
+      <div class="card"><h2>Digital Signature</h2>
+        <p style="font-size:13px;color:var(--gray);margin-bottom:10px">Upload your signature as a PNG (transparent background works best). It is printed automatically under "Prepared By" on PDFs of quantifications you create.</p>
+        <div class="sigbox" id="sigBox">${me.signature?`<img src="${me.signature}" alt="signature">`:'<span style="color:var(--gray);font-size:13px">No signature uploaded</span>'}</div>
+        <input type="file" id="sigFile" accept="image/png" style="margin-top:10px">
+        <div style="display:flex;gap:8px">
+          <button class="btn brand" onclick="saveSignature()">Save signature</button>
+          ${me.signature?'<button class="btn danger" onclick="removeSignature()">Remove</button>':''}
+        </div>
+        <div class="err" id="sigMsg"></div>
+      </div>
+      <div class="card"><h2>Security</h2>
+        <label>Current Password</label><input id="sPwCur" type="password">
+        <label>New Password (min 6 characters)</label><input id="sPwNew" type="password">
+        <label>Confirm New Password</label><input id="sPwNew2" type="password">
+        <button class="btn" onclick="savePassword()">Change password</button>
+        <div class="err" id="pwMsg"></div>
+      </div>
+      <div class="card"><h2>Look &amp; Feel</h2>
+        <label>Theme</label>
+        <select id="sTheme" onchange="setTheme(this.value)">
+          <option value="light" ${document.body.classList.contains('dark')?'':'selected'}>Light</option>
+          <option value="dark" ${document.body.classList.contains('dark')?'selected':''}>Dark</option>
+        </select>
+        <p style="font-size:12px;color:var(--gray);margin-top:8px">Saved on this device.</p>
+      </div>
+    </div>
+  </div>`;
+  $('#sigFile').addEventListener('change',e=>{
+    const f=e.target.files[0];if(!f)return;
+    if(f.type!=='image/png'){$('#sigMsg').textContent='Please choose a PNG file.';return;}
+    if(f.size>300000){$('#sigMsg').textContent='File too large (max 300KB).';return;}
+    const rd=new FileReader();
+    rd.onload=()=>{sigData=rd.result;$('#sigBox').innerHTML=`<img src="${sigData}" alt="signature preview">`;$('#sigMsg').textContent='';};
+    rd.readAsDataURL(f);
+  });
 }
-async function changePw(){
-  const current=prompt('Current password:');if(current===null)return;
-  const next=prompt('New password (min 6 characters):');if(next===null)return;
-  try{await api('/me/password',{method:'POST',body:JSON.stringify({current,next})});alert('Password changed.');}
-  catch(e){alert(e.message);}
+function setTheme(t){
+  document.body.classList.toggle('dark',t==='dark');
+  localStorage.setItem('qf_theme',t);
+}
+async function saveProfile(){
+  try{
+    await api('/me/profile',{method:'PUT',body:JSON.stringify({name:$('#sName').value,designation:$('#sDesig').value,phone:$('#sPhone').value,dob:$('#sDob').value})});
+    me=await api('/me');
+    $('#uinfo').innerHTML=`${esc(me.name)} · <span class="tag ${me.role}">${me.role}</span> ${esc(me.department||'')}`;
+    $('#sMsg').textContent='Profile saved.';setTimeout(()=>$('#sMsg').textContent='',2500);
+  }catch(e){$('#sMsg').className='err';$('#sMsg').textContent=e.message;}
+}
+async function saveSignature(){
+  if(!sigData){$('#sigMsg').textContent='Choose a PNG file first.';return;}
+  try{await api('/me/profile',{method:'PUT',body:JSON.stringify({signature:sigData})});settingsView();}
+  catch(e){$('#sigMsg').textContent=e.message;}
+}
+async function removeSignature(){
+  if(!confirm('Remove your saved signature?'))return;
+  try{await api('/me/profile',{method:'PUT',body:JSON.stringify({signature:''})});settingsView();}
+  catch(e){$('#sigMsg').textContent=e.message;}
+}
+async function savePassword(){
+  const cur=$('#sPwCur').value,n1=$('#sPwNew').value,n2=$('#sPwNew2').value;
+  if(n1!==n2){$('#pwMsg').textContent='New passwords do not match.';return;}
+  try{await api('/me/password',{method:'POST',body:JSON.stringify({current:cur,next:n1})});
+    $('#pwMsg').className='ok';$('#pwMsg').textContent='Password changed.';
+    $('#sPwCur').value=$('#sPwNew').value=$('#sPwNew2').value='';
+  }catch(e){$('#pwMsg').className='err';$('#pwMsg').textContent=e.message;}
 }
 
 // ---------- shell ----------
@@ -154,7 +247,7 @@ async function boot(){
   $('#navAudit').style.display=me.role==='ADMIN'?'':'none';
   document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{
     document.querySelectorAll('#nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active');
-    ({list:listView,new:()=>editorView(),items:itemsView,users:usersView,audit:auditView})[b.dataset.view]();
+    ({list:listView,new:()=>editorView(),items:itemsView,users:usersView,audit:auditView,settings:settingsView})[b.dataset.view]();
   });
   listView();
 }
@@ -333,7 +426,15 @@ async function itemsView(filter=''){
         <div><label>Unit</label><input id="niUnit" value="Nos"></div>
         <div><label>Price</label><input id="niPrice" type="number" step="any"></div>
         <button class="btn brand" onclick="addItem(false)">Add</button>
-      </div></div><div class="err" id="niErr"></div><hr style="margin:16px 0;border:none;border-top:1px solid #e5e7eb">`:''}
+      </div></div><div class="err" id="niErr"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+        <button class="btn sm" onclick="$('#xlsFile').click()">Upload Excel (bulk add)</button>
+        <input type="file" id="xlsFile" accept=".xlsx,.xls,.csv" class="hidden">
+        <button class="btn sm" onclick="scanDupes()">Scan for duplicates</button>
+      </div>
+      <div id="bulkMsg" style="font-size:13px;margin-top:8px"></div>
+      <div id="dupeArea"></div>
+      <hr style="margin:16px 0;border:none;border-top:1px solid #e5e7eb">`:''}
     <label>Search</label><input id="itSearch" value="${esc(filter)}" placeholder="Type to filter...">
     <div style="margin-top:12px;max-height:480px;overflow-y:auto"><table>
       <thead><tr><th>#</th><th>Item Name</th><th>Unit</th><th style="text-align:right">Price</th>${admin?'<th></th>':''}</tr></thead>
@@ -343,6 +444,55 @@ async function itemsView(filter=''){
         <button class="btn sm danger" onclick="delItem(${it.id})">Del</button></td>`:''}</tr>`).join('')}
       </tbody></table></div></div>`;
   let t;$('#itSearch').addEventListener('input',e=>{clearTimeout(t);t=setTimeout(()=>itemsView(e.target.value),300);});
+  const xf=$('#xlsFile');if(xf)xf.addEventListener('change',handleExcel);
+}
+let XLSXlib=null;
+async function loadXLSX(){
+  if(XLSXlib)return XLSXlib;
+  await new Promise((ok,err)=>{const sc=document.createElement('script');
+    sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    sc.onload=ok;sc.onerror=()=>err(new Error('Could not load Excel reader'));document.head.appendChild(sc);});
+  XLSXlib=window.XLSX;return XLSXlib;
+}
+async function handleExcel(e){
+  const f=e.target.files[0];if(!f)return;
+  const msg=$('#bulkMsg');msg.textContent='Reading file...';
+  try{
+    const XLSX=await loadXLSX();
+    const wb=XLSX.read(await f.arrayBuffer());
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});
+    // find header row: a row containing something like "item"/"name" and "price"/"rate"
+    let hi=-1,ci={name:-1,unit:-1,price:-1};
+    for(let i=0;i<Math.min(rows.length,10);i++){
+      const low=rows[i].map(c=>String(c).toLowerCase());
+      const n=low.findIndex(c=>c.includes('item')||c.includes('name')||c.includes('description'));
+      const p=low.findIndex(c=>c.includes('price')||c.includes('rate'));
+      if(n>=0&&p>=0){hi=i;ci={name:n,unit:low.findIndex(c=>c.includes('unit')),price:p};break;}
+    }
+    if(hi<0){msg.innerHTML='<span class="err">Could not find columns. The sheet needs headers like "Item Name" and "Price" (optional "Unit").</span>';return;}
+    const items=rows.slice(hi+1).map(r=>({name:String(r[ci.name]||'').trim(),unit:ci.unit>=0?String(r[ci.unit]||'').trim():'',price:r[ci.price]}))
+      .filter(r=>r.name&&r.price!==''&&!isNaN(Number(r.price)));
+    if(!items.length){msg.innerHTML='<span class="err">No valid rows found.</span>';return;}
+    if(!confirm('Found '+items.length+' items in "'+f.name+'". Add them to the list? (exact duplicates will be skipped)'))return;
+    msg.textContent='Uploading...';
+    const r=await api('/items/bulk',{method:'POST',body:JSON.stringify({items})});
+    msg.innerHTML='<span class="ok">Added '+r.added+' items. Skipped '+r.skipped.length+' already in the list'+(r.invalid.length?', '+r.invalid.length+' invalid rows':'')+'.</span>';
+    setTimeout(()=>itemsView(),1500);
+  }catch(err){msg.innerHTML='<span class="err">'+esc(err.message)+'</span>';}
+}
+async function scanDupes(){
+  const area=$('#dupeArea');area.innerHTML='<p style="font-size:13px;color:var(--gray)">Scanning...</p>';
+  const groups=await api('/items/duplicates');
+  if(!groups.length){area.innerHTML='<p class="ok">No likely duplicates found.</p>';return;}
+  area.innerHTML='<h2 style="margin-top:14px">Possible duplicates ('+groups.length+' groups)</h2>'+
+    '<p style="font-size:12px;color:var(--gray);margin-bottom:8px">Review each group and delete the entries you don\'t want to keep.</p>'+
+    groups.map(g=>`<table style="margin-bottom:12px"><tbody>${g.map(it=>
+      `<tr><td>${esc(it.name)}</td><td style="width:70px">${esc(it.unit)}</td><td style="width:90px;text-align:right">${fmt(it.price)}</td>
+      <td style="width:70px"><button class="btn sm danger" onclick="delDupe(${it.id})">Delete</button></td></tr>`).join('')}</tbody></table>`).join('');
+}
+async function delDupe(id){
+  if(!confirm('Delete this item from the list?'))return;
+  await api('/items/'+id,{method:'DELETE'});scanDupes();
 }
 async function addItem(force){
   try{
