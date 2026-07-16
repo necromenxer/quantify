@@ -67,6 +67,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
   for (const s of stmts.split(';').map(x => x.trim()).filter(Boolean)) await client.execute(s);
   // migration: designation column for users (ignore if it already exists)
   try { await client.execute('ALTER TABLE users ADD COLUMN designation TEXT'); } catch {}
+  try { await client.execute('ALTER TABLE users ADD COLUMN phone TEXT'); } catch {}
+  try { await client.execute('ALTER TABLE users ADD COLUMN dob TEXT'); } catch {}
+  try { await client.execute('ALTER TABLE users ADD COLUMN signature TEXT'); } catch {}
 
   const itemCount = (await get('SELECT COUNT(*) c FROM items')).c;
   if (Number(itemCount) === 0) {

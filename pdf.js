@@ -22,7 +22,7 @@ function generatePdf(q, stream) {
   doc.font('Helvetica-Bold').fontSize(12).fillColor('#000')
      .text(q.title, M, 128, { width: W, align: 'center', lineBreak: false });
   doc.font('Helvetica').fontSize(8.5).fillColor('#444')
-     .text(`Department: ${q.department}    |    Prepared by: ${q.creator_name}    |    Date: ${(q.updated_at || q.created_at).slice(0, 10)}`,
+     .text(`Department: ${q.department}    |    Date: ${(q.updated_at || q.created_at).slice(0, 10)}`,
        M, 146, { width: W, align: 'center', lineBreak: false });
 
   // ---- Item table ----
@@ -104,6 +104,13 @@ function generatePdf(q, stream) {
   };
   sig(M + 6, q.checked_by, q.checked_designation);
   sig(M + half + 6, q.approved_by, q.approved_designation);
+  // digital signature of the preparing user, if uploaded in Settings
+  if (q.creator_signature && String(q.creator_signature).startsWith('data:image/png;base64,')) {
+    try {
+      const buf = Buffer.from(String(q.creator_signature).split(',')[1], 'base64');
+      doc.image(buf, M + 60, y + 54, { fit: [140, 30] });
+    } catch {}
+  }
 
   // ---- Footer: contact line + FDC mark (no credits) ----
   doc.font('Helvetica').fontSize(8).fillColor('#666')

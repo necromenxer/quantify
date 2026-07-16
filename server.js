@@ -10,7 +10,7 @@ const SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
 const PORT = process.env.PORT || 3000;
 const DEPARTMENTS = ['Technical Services', 'Maintenance Services', 'Infrastructure Services', 'Development Services'];
 
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 const wrap = fn => (req, res) => fn(req, res).catch(e => { console.error(e); res.status(500).json({ error: 'Server error' }); });
@@ -21,7 +21,7 @@ async function auth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Not logged in' });
   try {
     const payload = jwt.verify(token, SECRET);
-    const user = await db.get('SELECT id, email, name, role, department, designation, status FROM users WHERE id = ?', [payload.id]);
+    const user = await db.get('SELECT id, email, name, role, department, designation, phone, dob, signature, status FROM users WHERE id = ?', [payload.id]);
     if (!user || user.status !== 'ACTIVE') return res.status(401).json({ error: 'Account not active' });
     req.user = user; req.user.id = Number(req.user.id);
     next();
@@ -51,7 +51,7 @@ app.post('/api/login', wrap(async (req, res) => {
   if (user.status === 'PENDING') return res.status(403).json({ error: 'Account awaiting admin approval' });
   if (user.status === 'DISABLED') return res.status(403).json({ error: 'Account disabled. Contact admin.' });
   const token = jwt.sign({ id: Number(user.id) }, SECRET, { expiresIn: '12h' });
-  res.json({ token, user: { id: Number(user.id), email: user.email, name: user.name, role: user.role, department: user.department, designation: user.designation } });
+  res.json({ token, user: { id: Number(user.id), email: user.email, name: user.name, role: user.role, department: user.department, designation: user.designation, phone: user.phone, dob: user.dob, signature: user.signature } });
 }));
 
 app.get('/api/me', auth, (req, res) => res.json(req.user));
@@ -66,8 +66,15 @@ app.post('/api/me/password', auth, wrap(async (req, res) => {
 }));
 
 app.put('/api/me/profile', auth, wrap(async (req, res) => {
-  const { designation } = req.body || {};
-  await db.run('UPDATE users SET designation = ? WHERE id = ?', [(designation || '').trim(), req.user.id]);
+  const { name, designation, phone, dob, signature } = req.body || {};
+  if (name !== undefined && !String(name).trim()) return res.status(400).json({ error: 'Name cannot be empty' });
+  if (signature !== undefined && signature !== null && signature !== '') {
+    if (!String(signature).startsWith('data:image/png;base64,')) return res.status(400).json({ error: 'Signature must be a PNG image' });
+    if (String(signature).length > 500000) return res.status(400).json({ error: 'Signature image too large (max ~350KB)' });
+  }
+  await db.run(`UPDATE users SET name = COALESCE(?, name), designation = COALESCE(?, designation),
+                phone = COALESCE(?, phone), dob = COALESCE(?, dob), signature = COALESCE(?, signature) WHERE id = ?`,
+    [name !== undefined ? String(name).trim() : null, designation ?? null, phone ?? null, dob ?? null, signature ?? null, req.user.id]);
   res.json({ ok: true });
 }));
 
@@ -104,6 +111,53 @@ async function similarItems(name) {
   }).slice(0, 8);
 }
 
+// scan the whole list for likely duplicate groups (admin tool)
+app.get('/api/items/duplicates', auth, adminOnly, wrap(async (req, res) => {
+  const items = await db.all('SELECT id, name, unit, price FROM items WHERE active = 1 ORDER BY id');
+  const norm = n => n.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const groups = [];
+  const used = new Set();
+  for (let i = 0; i < items.length; i++) {
+    if (used.has(i)) continue;
+    const a = norm(items[i].name), wa = a.split(' ').filter(w => w.length > 2);
+    const grp = [items[i]];
+    for (let j = i + 1; j < items.length; j++) {
+      if (used.has(j)) continue;
+      const b = norm(items[j].name);
+      let match = a === b;
+      if (!match && wa.length) {
+        const wb = b.split(' ').filter(w => w.length > 2);
+        const hits = wa.filter(w => b.includes(w)).length;
+        const hits2 = wb.filter(w => a.includes(w)).length;
+        match = wa.length >= 2 && wb.length >= 2 && (hits / wa.length >= 0.8 && hits2 / wb.length >= 0.8);
+      }
+      if (match) { grp.push(items[j]); used.add(j); }
+    }
+    if (grp.length > 1) { groups.push(grp); used.add(i); }
+  }
+  res.json(groups);
+}));
+
+// bulk add from spreadsheet (admin): body { items: [{name, unit, price}] }
+app.post('/api/items/bulk', auth, adminOnly, wrap(async (req, res) => {
+  const list = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!list.length) return res.status(400).json({ error: 'No rows found' });
+  if (list.length > 2000) return res.status(400).json({ error: 'Too many rows (max 2000)' });
+  const existing = await db.all('SELECT name FROM items WHERE active = 1');
+  const have = new Set(existing.map(e => e.name.toLowerCase().trim()));
+  let added = 0; const skipped = [], invalid = [];
+  for (const r of list) {
+    const name = String(r.name || '').trim();
+    const price = Number(r.price);
+    if (!name || isNaN(price)) { if (name) invalid.push(name); continue; }
+    if (have.has(name.toLowerCase())) { skipped.push(name); continue; }
+    await db.run('INSERT INTO items (name, unit, price) VALUES (?, ?, ?)', [name, String(r.unit || 'Nos').trim() || 'Nos', price]);
+    have.add(name.toLowerCase()); added++;
+  }
+  await audit(req.user, 'ITEM_BULK', 'Bulk upload: ' + added + ' added, ' + skipped.length + ' skipped (already exist), ' + invalid.length + ' invalid');
+  res.json({ ok: true, added, skipped, invalid });
+}));
+
 app.post('/api/items', auth, adminOnly, wrap(async (req, res) => {
   const { name, unit, price, force } = req.body || {};
   if (!name || price === undefined || isNaN(price)) return res.status(400).json({ error: 'Name and valid price required' });
@@ -138,7 +192,7 @@ const DEPTS_OK = d => DEPARTMENTS.includes(d);
 const canEdit = (user, q) => user.role === 'ADMIN' || Number(q.created_by) === user.id;
 
 async function loadQuant(id) {
-  const q = await db.get('SELECT q.*, u.name AS creator_name, u.email AS creator_email FROM quantifications q JOIN users u ON u.id = q.created_by WHERE q.id = ?', [id]);
+  const q = await db.get('SELECT q.*, u.name AS creator_name, u.email AS creator_email, u.signature AS creator_signature FROM quantifications q JOIN users u ON u.id = q.created_by WHERE q.id = ?', [id]);
   if (!q) return null;
   q.lines = await db.all('SELECT * FROM quantification_lines WHERE quantification_id = ? ORDER BY position', [id]);
   return q;
