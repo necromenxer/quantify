@@ -271,9 +271,16 @@ async function showDD(inp,i){
   if(!ddItems.length)return;
   ddRow=i;ddHl=-1;
   ddEl=document.createElement('div');ddEl.className='dd-list';
+  // fixed positioning attached to <body> so scroll containers can't clip the dropdown
+  const rc=inp.getBoundingClientRect();
+  ddEl.style.position='fixed';
+  ddEl.style.left=rc.left+'px';
+  ddEl.style.top=(rc.bottom+1)+'px';
+  ddEl.style.width=rc.width+'px';
+  ddEl.style.right='auto';
   ddEl.innerHTML=ddItems.map((it,j)=>`<div data-j="${j}"><span>${esc(it.name)}</span><small>${esc(it.unit)} · ${fmt(it.price)}</small></div>`).join('');
   ddEl.querySelectorAll('div[data-j]').forEach(d=>d.addEventListener('mousedown',e=>{e.preventDefault();pickDD(+d.dataset.j);}));
-  inp.parentElement.appendChild(ddEl);
+  document.body.appendChild(ddEl);
 }
 function ddKeys(e){
   if(!ddEl)return;
@@ -289,6 +296,8 @@ function pickDD(j){
   const qtyInp=document.querySelector(`input[data-i="${ddRow}"][data-f="qty"]`);if(qtyInp)qtyInp.focus();
 }
 function closeDD(){if(ddEl){ddEl.remove();ddEl=null;}}
+window.addEventListener('scroll',closeDD,true);
+window.addEventListener('resize',closeDD);
 function recalc(){
   const sub=lines.reduce((s,l)=>s+(Number(l.qty)||0)*(Number(l.rate)||0),0);
   const gst=sub*(Number($('#qGst')?.value)||0)/100;
