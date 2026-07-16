@@ -94,7 +94,7 @@ function generatePdf(q, stream) {
   doc.moveTo(M, y + 18).lineTo(M + W, y + 18).stroke();
   doc.moveTo(M + half, y).lineTo(M + half, y + sigH).stroke();
   doc.fillColor('#000').font('Helvetica-Bold').fontSize(9)
-     .text('Checked By', M + 6, y + 5, { lineBreak: false }).text('Approved by', M + half + 6, y + 5, { lineBreak: false });
+     .text('Prepared By', M + 6, y + 5, { lineBreak: false }).text('Approved by', M + half + 6, y + 5, { lineBreak: false });
   doc.font('Helvetica').fontSize(9);
   const sig = (x0, name, desig) => {
     doc.text('Name: ' + (name || ''), x0, y + 25, { width: half - 12, lineBreak: false })

@@ -21,7 +21,7 @@ async function auth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Not logged in' });
   try {
     const payload = jwt.verify(token, SECRET);
-    const user = await db.get('SELECT id, email, name, role, department, status FROM users WHERE id = ?', [payload.id]);
+    const user = await db.get('SELECT id, email, name, role, department, designation, status FROM users WHERE id = ?', [payload.id]);
     if (!user || user.status !== 'ACTIVE') return res.status(401).json({ error: 'Account not active' });
     req.user = user; req.user.id = Number(req.user.id);
     next();
@@ -51,7 +51,7 @@ app.post('/api/login', wrap(async (req, res) => {
   if (user.status === 'PENDING') return res.status(403).json({ error: 'Account awaiting admin approval' });
   if (user.status === 'DISABLED') return res.status(403).json({ error: 'Account disabled. Contact admin.' });
   const token = jwt.sign({ id: Number(user.id) }, SECRET, { expiresIn: '12h' });
-  res.json({ token, user: { id: Number(user.id), email: user.email, name: user.name, role: user.role, department: user.department } });
+  res.json({ token, user: { id: Number(user.id), email: user.email, name: user.name, role: user.role, department: user.department, designation: user.designation } });
 }));
 
 app.get('/api/me', auth, (req, res) => res.json(req.user));
@@ -62,6 +62,12 @@ app.post('/api/me/password', auth, wrap(async (req, res) => {
   const u = await db.get('SELECT password_hash FROM users WHERE id = ?', [req.user.id]);
   if (!bcrypt.compareSync(current || '', u.password_hash)) return res.status(400).json({ error: 'Current password is incorrect' });
   await db.run('UPDATE users SET password_hash = ? WHERE id = ?', [bcrypt.hashSync(nextPw, 10), req.user.id]);
+  res.json({ ok: true });
+}));
+
+app.put('/api/me/profile', auth, wrap(async (req, res) => {
+  const { designation } = req.body || {};
+  await db.run('UPDATE users SET designation = ? WHERE id = ?', [(designation || '').trim(), req.user.id]);
   res.json({ ok: true });
 }));
 
@@ -199,21 +205,22 @@ app.get('/api/quantifications/:id/pdf', auth, wrap(async (req, res) => {
   const q = await loadQuant(req.params.id);
   if (!q) return res.status(404).json({ error: 'Not found' });
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', 'attachment; filename="Quantification-' + q.id + '.pdf"');
+  const safe = (q.title || 'Quantification').replace(/[^a-zA-Z0-9 _().-]+/g, '').trim().slice(0, 80) || 'Quantification';
+  res.setHeader('Content-Disposition', 'attachment; filename="' + safe + '.pdf"');
   generatePdf(q, res);
 }));
 
 app.get('/api/admin/users', auth, adminOnly, wrap(async (req, res) => {
-  res.json(await db.all('SELECT id, email, name, role, department, status, created_at FROM users ORDER BY created_at DESC'));
+  res.json(await db.all('SELECT id, email, name, role, department, designation, status, created_at FROM users ORDER BY created_at DESC'));
 }));
 
 app.put('/api/admin/users/:id', auth, adminOnly, wrap(async (req, res) => {
-  const { role, department, status } = req.body || {};
+  const { role, department, status, designation } = req.body || {};
   if (role && !['ADMIN', 'USER'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
   if (department && !DEPARTMENTS.includes(department)) return res.status(400).json({ error: 'Invalid department' });
   if (status && !['PENDING', 'ACTIVE', 'DISABLED'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
-  await db.run('UPDATE users SET role = COALESCE(?, role), department = COALESCE(?, department), status = COALESCE(?, status) WHERE id = ?',
-    [role ?? null, department ?? null, status ?? null, req.params.id]);
+  await db.run('UPDATE users SET role = COALESCE(?, role), department = COALESCE(?, department), status = COALESCE(?, status), designation = COALESCE(?, designation) WHERE id = ?',
+    [role ?? null, department ?? null, status ?? null, designation ?? null, req.params.id]);
   const target = await db.get('SELECT email FROM users WHERE id = ?', [req.params.id]);
   await audit(req.user, 'USER_UPDATE', (target ? target.email : req.params.id) + ' -> ' + JSON.stringify({ role, department, status }));
   res.json({ ok: true });
