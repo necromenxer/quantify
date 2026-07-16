@@ -55,6 +55,14 @@ CREATE TABLE IF NOT EXISTS quantification_lines (
   unit TEXT DEFAULT 'Nos',
   qty REAL NOT NULL DEFAULT 0,
   rate REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
+  user_name TEXT,
+  action TEXT NOT NULL,
+  details TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );`;
   for (const s of stmts.split(';').map(x => x.trim()).filter(Boolean)) await client.execute(s);
 

@@ -67,11 +67,23 @@ app.post('/api/me/password', auth, wrap(async (req, res) => {
 
 app.get('/api/items', auth, wrap(async (req, res) => {
   const q = (req.query.q || '').trim();
-  const rows = q
-    ? await db.all("SELECT id, name, unit, price FROM items WHERE active = 1 AND name LIKE ? ORDER BY name LIMIT 20", ['%' + q + '%'])
-    : await db.all('SELECT id, name, unit, price FROM items WHERE active = 1 ORDER BY name');
+  let rows;
+  if (q) {
+    // word-based search: every word must appear somewhere in the name ("18 mm" matches "18mm Marin Plywood")
+    const words = q.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 6);
+    const where = words.map(() => "LOWER(name) LIKE ?").join(' AND ');
+    rows = await db.all('SELECT id, name, unit, price FROM items WHERE active = 1 AND ' + where + ' ORDER BY name LIMIT 20',
+      words.map(w => '%' + w + '%'));
+  } else {
+    rows = await db.all('SELECT id, name, unit, price FROM items WHERE active = 1 ORDER BY name');
+  }
   res.json(rows);
 }));
+
+async function audit(user, action, details) {
+  try { await db.run('INSERT INTO audit_log (user_id, user_name, action, details) VALUES (?,?,?,?)',
+    [user.id, user.name, action, details]); } catch (e) { console.error('audit failed', e); }
+}
 
 async function similarItems(name) {
   const norm = name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -94,18 +106,25 @@ app.post('/api/items', auth, adminOnly, wrap(async (req, res) => {
     if (dupes.length) return res.status(409).json({ duplicates: dupes, message: 'Possible duplicate items found. Confirm to add anyway.' });
   }
   const info = await db.run('INSERT INTO items (name, unit, price) VALUES (?, ?, ?)', [name.trim(), unit || 'Nos', Number(price)]);
+  await audit(req.user, 'ITEM_ADD', name.trim() + ' @ ' + Number(price) + (force ? ' (forced past duplicate warning)' : ''));
   res.json({ ok: true, id: info.lastInsertRowid });
 }));
 
 app.put('/api/items/:id', auth, adminOnly, wrap(async (req, res) => {
   const { name, unit, price } = req.body || {};
+  const before = await db.get('SELECT name, unit, price FROM items WHERE id = ?', [req.params.id]);
   await db.run('UPDATE items SET name = COALESCE(?, name), unit = COALESCE(?, unit), price = COALESCE(?, price) WHERE id = ?',
     [name ?? null, unit ?? null, price !== undefined ? Number(price) : null, req.params.id]);
+  const after = await db.get('SELECT name, unit, price FROM items WHERE id = ?', [req.params.id]);
+  if (before && after) await audit(req.user, 'ITEM_EDIT',
+    before.name + ' [' + before.unit + ', ' + before.price + '] -> ' + after.name + ' [' + after.unit + ', ' + after.price + ']');
   res.json({ ok: true });
 }));
 
 app.delete('/api/items/:id', auth, adminOnly, wrap(async (req, res) => {
+  const it = await db.get('SELECT name, price FROM items WHERE id = ?', [req.params.id]);
   await db.run('UPDATE items SET active = 0 WHERE id = ?', [req.params.id]);
+  if (it) await audit(req.user, 'ITEM_DELETE', it.name + ' @ ' + it.price);
   res.json({ ok: true });
 }));
 
@@ -169,8 +188,10 @@ app.put('/api/quantifications/:id', auth, wrap(async (req, res) => {
 }));
 
 app.delete('/api/quantifications/:id', auth, adminOnly, wrap(async (req, res) => {
+  const q = await db.get('SELECT title FROM quantifications WHERE id = ?', [req.params.id]);
   await db.run('DELETE FROM quantification_lines WHERE quantification_id = ?', [req.params.id]);
   await db.run('DELETE FROM quantifications WHERE id = ?', [req.params.id]);
+  if (q) await audit(req.user, 'QUANT_DELETE', q.title);
   res.json({ ok: true });
 }));
 
@@ -193,6 +214,8 @@ app.put('/api/admin/users/:id', auth, adminOnly, wrap(async (req, res) => {
   if (status && !['PENDING', 'ACTIVE', 'DISABLED'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
   await db.run('UPDATE users SET role = COALESCE(?, role), department = COALESCE(?, department), status = COALESCE(?, status) WHERE id = ?',
     [role ?? null, department ?? null, status ?? null, req.params.id]);
+  const target = await db.get('SELECT email FROM users WHERE id = ?', [req.params.id]);
+  await audit(req.user, 'USER_UPDATE', (target ? target.email : req.params.id) + ' -> ' + JSON.stringify({ role, department, status }));
   res.json({ ok: true });
 }));
 
@@ -200,6 +223,10 @@ app.delete('/api/admin/users/:id', auth, adminOnly, wrap(async (req, res) => {
   if (Number(req.params.id) === req.user.id) return res.status(400).json({ error: 'Cannot delete yourself' });
   await db.run('UPDATE users SET status = ? WHERE id = ?', ['DISABLED', req.params.id]);
   res.json({ ok: true });
+}));
+
+app.get('/api/admin/audit', auth, adminOnly, wrap(async (req, res) => {
+  res.json(await db.all('SELECT * FROM audit_log ORDER BY id DESC LIMIT 300'));
 }));
 
 app.get('/api/departments', (req, res) => res.json(DEPARTMENTS));
