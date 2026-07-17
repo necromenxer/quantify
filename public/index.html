@@ -417,6 +417,7 @@ async function saveQuant(){
 }
 
 // ---------- master items ----------
+let editingItemId=null;
 async function itemsView(filter=''){
   const items=await api('/items'+(filter?'?q='+encodeURIComponent(filter):''));
   const admin=me.role==='ADMIN';
@@ -439,13 +440,34 @@ async function itemsView(filter=''){
     <label>Search</label><input id="itSearch" value="${esc(filter)}" placeholder="Type to filter...">
     <div style="margin-top:12px;max-height:480px;overflow-y:auto"><table>
       <thead><tr><th>#</th><th>Item Name</th><th>Unit</th><th style="text-align:right;padding-right:20px">Price</th>${admin?'<th style="width:150px"></th>':''}</tr></thead>
-      <tbody>${items.map((it,i)=>`<tr><td>${i+1}</td><td>${esc(it.name)}</td><td>${esc(it.unit)}</td>
+      <tbody>${items.map((it,i)=>admin&&it.id===editingItemId?`<tr>
+        <td>${i+1}</td>
+        <td><input id="edName${it.id}" value="${esc(it.name)}"></td>
+        <td><input id="edUnit${it.id}" value="${esc(it.unit)}"></td>
+        <td><input id="edPrice${it.id}" type="number" step="any" value="${it.price}" style="text-align:right"></td>
+        <td class="actions" style="white-space:nowrap">
+          <button class="btn sm brand" onclick="saveEditItem(${it.id})">Save</button>
+          <button class="btn sm" onclick="cancelEditItem()">Cancel</button>
+        </td>
+      </tr>`:`<tr><td>${i+1}</td><td>${esc(it.name)}</td><td>${esc(it.unit)}</td>
         <td style="text-align:right;padding-right:20px;white-space:nowrap">${fmt(it.price)}</td>
-        ${admin?`<td class="actions" style="white-space:nowrap"><button class="btn sm" onclick="editItem(${it.id},'${esc(it.name).replace(/'/g,"\\'")}','${esc(it.unit)}',${it.price})">Edit</button>
+        ${admin?`<td class="actions" style="white-space:nowrap"><button class="btn sm" onclick="startEditItem(${it.id})">Edit</button>
         <button class="btn sm danger" onclick="delItem(${it.id})">Del</button></td>`:''}</tr>`).join('')}
       </tbody></table></div></div>`;
   let t;$('#itSearch').addEventListener('input',e=>{clearTimeout(t);t=setTimeout(()=>itemsView(e.target.value),300);});
   const xf=$('#xlsFile');if(xf)xf.addEventListener('change',handleExcel);
+  if(editingItemId){
+    const nameInp=$('#edName'+editingItemId);
+    if(nameInp){
+      nameInp.focus();nameInp.select();
+      document.querySelectorAll(`#edName${editingItemId}, #edUnit${editingItemId}, #edPrice${editingItemId}`).forEach(inp=>{
+        inp.addEventListener('keydown',e=>{
+          if(e.key==='Enter')saveEditItem(editingItemId);
+          else if(e.key==='Escape')cancelEditItem();
+        });
+      });
+    }
+  }
 }
 let XLSXlib=null;
 async function loadXLSX(){
@@ -507,11 +529,19 @@ async function addItem(force){
     }else $('#niErr').textContent=e.message;
   }
 }
-async function editItem(id,name,unit,price){
-  const n=prompt('Item name:',name);if(n===null)return;
-  const u=prompt('Unit:',unit);if(u===null)return;
-  const p=prompt('Price:',price);if(p===null||isNaN(p))return;
-  await api('/items/'+id,{method:'PUT',body:JSON.stringify({name:n,unit:u,price:Number(p)})});itemsView();
+function startEditItem(id){editingItemId=id;itemsView($('#itSearch')?.value||'');}
+function cancelEditItem(){editingItemId=null;itemsView($('#itSearch')?.value||'');}
+async function saveEditItem(id){
+  const name=$('#edName'+id).value.trim();
+  const unit=$('#edUnit'+id).value.trim()||'Nos';
+  const price=Number($('#edPrice'+id).value);
+  if(!name){alert('Item name cannot be empty.');return;}
+  if(isNaN(price)){alert('Enter a valid price.');return;}
+  try{
+    await api('/items/'+id,{method:'PUT',body:JSON.stringify({name,unit,price})});
+    editingItemId=null;
+    itemsView($('#itSearch')?.value||'');
+  }catch(e){alert(e.message);}
 }
 async function delItem(id){if(confirm('Remove this item from the master list?')){await api('/items/'+id,{method:'DELETE'});itemsView();}}
 
