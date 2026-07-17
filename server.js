@@ -394,7 +394,7 @@ app.post('/api/cad/calculate', auth, wrap(async (req, res) => {
     if (!lg.is_opening) continue;
     const raw = agg[lg.name];
     let area = 0;
-    if (lg.measure_type === 'LENGTH' && lg.use_height) {
+    if (lg.use_height) {
       const height = (legendHeights[lg.name] !== undefined && legendHeights[lg.name] !== '') ? Number(legendHeights[lg.name]) : (Number(lg.height_m) || 0);
       area = raw.length * height;
     } else if (lg.measure_type === 'COUNT') {
@@ -414,7 +414,7 @@ app.post('/api/cad/calculate', auth, wrap(async (req, res) => {
     const material = materialFor(lg);
     let qty, unit = lg.output_unit, detail;
 
-    if (lg.measure_type === 'LENGTH' && lg.use_height) {
+    if (lg.use_height) {
       const height = (legendHeights[lg.name] !== undefined && legendHeights[lg.name] !== '') ? Number(legendHeights[lg.name]) : (Number(lg.height_m) || 0);
       let area = raw.length * height;
       let nets = []; try { nets = JSON.parse(lg.nets_from || '[]'); } catch { nets = []; }
