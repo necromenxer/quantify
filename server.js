@@ -2,8 +2,11 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const path = require('path');
+const multer = require('multer');
+const DxfParser = require('dxf-parser');
 const db = require('./db');
 const { generatePdf } = require('./pdf');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 const app = express();
 const SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
@@ -110,6 +113,133 @@ async function similarItems(name) {
     return hits / words.length >= 0.75;
   }).slice(0, 8);
 }
+
+// ---------- CAD drawing takeoff ----------
+const CAD_CATEGORIES = ['WALL', 'OPENING', 'ELECTRICAL', 'NETWORK', 'IGNORE'];
+const CAD_UNIT_FACTORS = { mm: 0.001, cm: 0.01, m: 1, ft: 0.3048, in: 0.0254 };
+
+function cadGuessCategory(name) {
+  const n = String(name || '').toUpperCase();
+  if (/DOOR|WINDOW|OPENING/.test(n)) return 'OPENING';
+  if (/WALL|PARTITION/.test(n)) return 'WALL';
+  if (/ELEC|POWER|LIGHT|LTG/.test(n)) return 'ELECTRICAL';
+  if (/NET|DATA|LAN|COMM|TEL|IT[-_]/.test(n)) return 'NETWORK';
+  return 'IGNORE';
+}
+function cadDist(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
+function cadEntityLength(e) {
+  const verts = e.vertices || [];
+  if (verts.length < 2) return 0;
+  let len = 0;
+  for (let i = 1; i < verts.length; i++) len += cadDist(verts[i - 1], verts[i]);
+  if (e.shape) len += cadDist(verts[verts.length - 1], verts[0]); // closed polyline
+  return len;
+}
+
+// upload + parse a DXF file, return detected layers with lengths and a suggested category each
+app.post('/api/cad/parse', auth, upload.single('file'), wrap(async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  if (!/\.dxf$/i.test(req.file.originalname || '')) {
+    return res.status(400).json({ error: 'Only DXF files are supported. In your CAD software, use "Save As" / "Export" and choose DXF (ASCII) format — DWG binary files cannot be read directly.' });
+  }
+  let dxf;
+  try {
+    dxf = new DxfParser().parseSync(req.file.buffer.toString('utf8'));
+  } catch (e) {
+    return res.status(400).json({ error: 'Could not read this file as DXF. Make sure it was exported/saved as DXF (ASCII), not a binary DWG.' });
+  }
+  const byLayer = {};
+  for (const e of (dxf.entities || [])) {
+    if (!['LINE', 'LWPOLYLINE', 'POLYLINE'].includes(e.type)) continue;
+    const ly = e.layer || '0';
+    if (!byLayer[ly]) byLayer[ly] = { count: 0, length: 0 };
+    byLayer[ly].count++;
+    byLayer[ly].length += cadEntityLength(e);
+  }
+  const saved = await db.all('SELECT layer_name, category FROM cad_layers');
+  const savedMap = {}; saved.forEach(r => { savedMap[r.layer_name.toUpperCase()] = r.category; });
+  const layers = Object.keys(byLayer).map(name => ({
+    name, count: byLayer[name].count, length: Number(byLayer[name].length.toFixed(2)),
+    category: savedMap[name.toUpperCase()] || cadGuessCategory(name),
+  })).sort((a, b) => b.length - a.length);
+  if (!layers.length) return res.status(400).json({ error: 'No usable line/polyline geometry found in this drawing (only LINE, LWPOLYLINE and POLYLINE entities are read).' });
+  res.json({ layers });
+}));
+
+// saved defaults: material dimensions, waste/slack %, remembered layer-name -> category mappings
+app.get('/api/cad/settings', auth, wrap(async (req, res) => {
+  const rows = await db.all('SELECT key, value FROM cad_settings');
+  const settings = {}; rows.forEach(r => { try { settings[r.key] = JSON.parse(r.value); } catch { settings[r.key] = r.value; } });
+  const layerMap = await db.all('SELECT layer_name, category FROM cad_layers ORDER BY layer_name');
+  res.json({ settings, layerMap });
+}));
+
+app.put('/api/cad/settings', auth, wrap(async (req, res) => {
+  const { settings, layerMap } = req.body || {};
+  if (settings && typeof settings === 'object') {
+    for (const [k, v] of Object.entries(settings)) {
+      await db.run('INSERT INTO cad_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', [k, JSON.stringify(v)]);
+    }
+  }
+  if (Array.isArray(layerMap)) {
+    for (const l of layerMap) {
+      if (!l.name || !CAD_CATEGORIES.includes(l.category)) continue;
+      await db.run('INSERT INTO cad_layers (layer_name, category) VALUES (?, ?) ON CONFLICT(layer_name) DO UPDATE SET category = excluded.category',
+        [String(l.name).trim(), l.category]);
+    }
+  }
+  res.json({ ok: true });
+}));
+
+// given categorized layer lengths + material/wire parameters, compute a suggested quantity takeoff
+app.post('/api/cad/calculate', auth, wrap(async (req, res) => {
+  const b = req.body || {};
+  const factor = CAD_UNIT_FACTORS[b.drawingUnit] || 0.001;
+  let wallLenM = 0, openingLenM = 0, elecLenM = 0, netLenM = 0;
+  for (const l of (Array.isArray(b.layers) ? b.layers : [])) {
+    const lenM = (Number(l.length) || 0) * factor;
+    if (l.category === 'WALL') wallLenM += lenM;
+    else if (l.category === 'OPENING') openingLenM += lenM;
+    else if (l.category === 'ELECTRICAL') elecLenM += lenM;
+    else if (l.category === 'NETWORK') netLenM += lenM;
+  }
+  const wallH = Number(b.wallHeightM) || 3;
+  const openH = Number(b.openingHeightM) || wallH;
+  const grossArea = wallLenM * wallH;
+  const openingArea = Math.min(grossArea, openingLenM * openH);
+  const netArea = Math.max(0, grossArea - openingArea);
+  const waste = 1 + (Number(b.wastePct) || 5) / 100;
+  const items = [];
+  if (wallLenM > 0) {
+    const matLabel = (b.materialLabel && String(b.materialLabel).trim()) || (b.material === 'board' ? 'Boards' : 'Bricks');
+    let qty, unit;
+    if (b.material === 'board') {
+      const bw = Number(b.boardWidthM) || 1.22, bh = Number(b.boardHeightM) || 2.44;
+      qty = Math.ceil((netArea / (bw * bh)) * waste); unit = 'Nos';
+    } else {
+      const bl = (Number(b.brickLengthMm) || 225) + (Number(b.mortarMm) || 10);
+      const bh = (Number(b.brickHeightMm) || 75) + (Number(b.mortarMm) || 10);
+      qty = Math.ceil(((netArea * 1e6) / (bl * bh)) * waste); unit = 'Nos';
+    }
+    items.push({ label: 'Wall ' + matLabel, qty, unit,
+      detail: `Wall centerline ${wallLenM.toFixed(2)}m x height ${wallH}m = ${grossArea.toFixed(2)}m² gross, minus ${openingArea.toFixed(2)}m² openings = ${netArea.toFixed(2)}m² net, +${(waste * 100 - 100).toFixed(0)}% waste` });
+  }
+  if (elecLenM > 0) {
+    const pct = Number(b.elecSlackPct) || 10;
+    items.push({ label: 'Electrical Wire', qty: Number((elecLenM * (1 + pct / 100)).toFixed(1)), unit: 'm',
+      detail: `${elecLenM.toFixed(1)}m raw run length +${pct}% slack for drops/joints` });
+  }
+  if (netLenM > 0) {
+    const pct = Number(b.netSlackPct) || 10;
+    items.push({ label: 'Network / Data Cable', qty: Number((netLenM * (1 + pct / 100)).toFixed(1)), unit: 'm',
+      detail: `${netLenM.toFixed(1)}m raw run length +${pct}% slack for drops/joints` });
+  }
+  for (const it of items) {
+    const matches = await similarItems(it.label);
+    it.suggested = matches[0] || null;
+  }
+  res.json({ wallLenM, openingLenM, grossArea, openingArea, netArea, elecLenM, netLenM, items });
+}));
 
 // scan the whole list for likely duplicate groups (admin tool)
 app.get('/api/items/duplicates', auth, adminOnly, wrap(async (req, res) => {

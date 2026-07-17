@@ -63,6 +63,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
   action TEXT NOT NULL,
   details TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS cad_layers (
+  layer_name TEXT PRIMARY KEY,
+  category TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cad_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
 );`;
   for (const s of stmts.split(';').map(x => x.trim()).filter(Boolean)) await client.execute(s);
   // migration: designation column for users (ignore if it already exists)
