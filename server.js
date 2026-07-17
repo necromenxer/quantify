@@ -101,11 +101,13 @@ async function audit(user, action, details) {
     [user.id, user.name, action, details]); } catch (e) { console.error('audit failed', e); }
 }
 
-// Tokenize an item name for duplicate comparison. Size/dimension tokens (2", 3mm, 20A, 1/2...)
-// are kept regardless of length and compared for EXACT equality elsewhere, so "Wall Scrapper 2""
-// and "Wall Scrapper 3"" are correctly treated as different items, not near-duplicates.
+// Tokenize an item name for duplicate comparison. Short but meaningful distinguishing tokens -
+// sizes (2", 3mm, 20A), and short type/model codes (SP, PH) - are kept and compared for EXACT
+// equality elsewhere, so "Wall Scrapper 2"" vs "Wall Scrapper 3"" and "Quick Coupler SP" vs
+// "Quick Coupler PH" are correctly treated as different items, not near-duplicates. Only true
+// single-character filler tokens (e.g. a stray "x") are dropped.
 const itemNorm = n => n.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-const itemWords = n => itemNorm(n).split(' ').filter(w => w.length > 2 || /\d/.test(w));
+const itemWords = n => itemNorm(n).split(' ').filter(w => w.length > 1 || /\d/.test(w));
 
 async function similarItems(name) {
   const norm = itemNorm(name);
