@@ -101,16 +101,25 @@ async function audit(user, action, details) {
     [user.id, user.name, action, details]); } catch (e) { console.error('audit failed', e); }
 }
 
+// Tokenize an item name for duplicate comparison. Size/dimension tokens (2", 3mm, 20A, 1/2...)
+// are kept regardless of length and compared for EXACT equality elsewhere, so "Wall Scrapper 2""
+// and "Wall Scrapper 3"" are correctly treated as different items, not near-duplicates.
+const itemNorm = n => n.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const itemWords = n => itemNorm(n).split(' ').filter(w => w.length > 2 || /\d/.test(w));
+
 async function similarItems(name) {
-  const norm = name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  const words = norm.split(' ').filter(w => w.length > 2);
+  const norm = itemNorm(name);
+  const words = itemWords(name);
   const allItems = await db.all('SELECT id, name, unit, price FROM items WHERE active = 1');
   return allItems.filter(i => {
-    const inorm = i.name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const inorm = itemNorm(i.name);
     if (inorm === norm) return true;
     if (words.length === 0) return false;
-    const hits = words.filter(w => inorm.includes(w)).length;
-    return hits / words.length >= 0.75;
+    const iwords = itemWords(i.name);
+    if (iwords.length !== words.length) return false; // different number of significant tokens (e.g. missing/extra size) -> not a duplicate
+    const iwordSet = new Set(iwords);
+    const hits = words.filter(w => iwordSet.has(w)).length; // exact token match, not substring, so "2" never matches inside "12"
+    return hits / words.length >= 0.85;
   }).slice(0, 8);
 }
 
@@ -244,22 +253,23 @@ app.post('/api/cad/calculate', auth, wrap(async (req, res) => {
 // scan the whole list for likely duplicate groups (admin tool)
 app.get('/api/items/duplicates', auth, adminOnly, wrap(async (req, res) => {
   const items = await db.all('SELECT id, name, unit, price FROM items WHERE active = 1 ORDER BY id');
-  const norm = n => n.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const groups = [];
   const used = new Set();
   for (let i = 0; i < items.length; i++) {
     if (used.has(i)) continue;
-    const a = norm(items[i].name), wa = a.split(' ').filter(w => w.length > 2);
+    const a = itemNorm(items[i].name), wa = itemWords(items[i].name), waSet = new Set(wa);
     const grp = [items[i]];
     for (let j = i + 1; j < items.length; j++) {
       if (used.has(j)) continue;
-      const b = norm(items[j].name);
+      const b = itemNorm(items[j].name);
       let match = a === b;
       if (!match && wa.length) {
-        const wb = b.split(' ').filter(w => w.length > 2);
-        const hits = wa.filter(w => b.includes(w)).length;
-        const hits2 = wb.filter(w => a.includes(w)).length;
-        match = wa.length >= 2 && wb.length >= 2 && (hits / wa.length >= 0.8 && hits2 / wb.length >= 0.8);
+        const wb = itemWords(items[j].name), wbSet = new Set(wb);
+        // same number of significant tokens required, so a differing size/dimension token (e.g. 2" vs 3") can never be "missing" from the comparison
+        if (wa.length === wb.length && wa.length >= 2) {
+          const hits = wa.filter(w => wbSet.has(w)).length; // exact token match, not substring
+          match = hits / wa.length >= 0.85;
+        }
       }
       if (match) { grp.push(items[j]); used.add(j); }
     }
