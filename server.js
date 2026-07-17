@@ -434,7 +434,10 @@ app.post('/api/cad/calculate', auth, wrap(async (req, res) => {
       detail = `${raw.count} counted, +${wastePct}% waste`;
     }
     if (qty > 0) {
-      items.push({ label: lg.name, legend: lg.name, qty, unit, detail: detail + (lg.detail ? ' — ' + lg.detail : ''), materialId: material ? material.id : null, materialItemId: material ? material.item_id : null });
+      // the legend's static Detail note is only appended when no Material was picked — once a Material is
+      // chosen its own name (and linked item) already communicates the spec, so showing both would be
+      // redundant at best and wrong at worst (e.g. a legend's Detail says "300x300" but a 600x600 Material was picked).
+      items.push({ label: lg.name, legend: lg.name, qty, unit, detail: detail + (!material && lg.detail ? ' — ' + lg.detail : ''), materialId: material ? material.id : null, materialItemId: material ? material.item_id : null });
     }
   }
   // suggested master-item match: deterministic if a material with a linked item was chosen, else fuzzy fallback
