@@ -268,11 +268,11 @@ async function listView(){
     const mine=q.created_by===me.id||me.role==='ADMIN';
     return `<tr><td><b>${esc(q.title)}</b></td><td>${esc(q.department)}</td><td>${esc(q.creator_name)}</td>
     <td>${q.updated_at.slice(0,10)}</td><td style="text-align:right;padding-right:20px;white-space:nowrap">${fmt(grand)}</td>
-    <td class="actions" style="white-space:nowrap">
+    <td style="white-space:nowrap"><div class="actions">
       <button class="btn sm" onclick="editorView(${q.id})">${mine?'Edit':'View'}</button>
       <button class="btn sm brand" onclick="dlPdf(${q.id})">PDF</button>
       ${me.role==='ADMIN'?`<button class="btn sm danger" onclick="delQuant(${q.id})">Del</button>`:''}
-    </td></tr>`;}).join('')||'<tr><td colspan="6" style="color:#999">No quantifications yet.</td></tr>'}
+    </div></td></tr>`;}).join('')||'<tr><td colspan="6" style="color:#999">No quantifications yet.</td></tr>'}
   </tbody></table></div>`;
 }
 async function dlPdf(id){
@@ -445,14 +445,14 @@ async function itemsView(filter=''){
         <td><input id="edName${it.id}" value="${esc(it.name)}"></td>
         <td><input id="edUnit${it.id}" value="${esc(it.unit)}"></td>
         <td><input id="edPrice${it.id}" type="number" step="any" value="${it.price}" style="text-align:right"></td>
-        <td class="actions" style="white-space:nowrap">
+        <td style="white-space:nowrap"><div class="actions">
           <button class="btn sm brand" onclick="saveEditItem(${it.id})">Save</button>
           <button class="btn sm" onclick="cancelEditItem()">Cancel</button>
-        </td>
+        </div></td>
       </tr>`:`<tr><td>${i+1}</td><td>${esc(it.name)}</td><td>${esc(it.unit)}</td>
         <td style="text-align:right;padding-right:20px;white-space:nowrap">${fmt(it.price)}</td>
-        ${admin?`<td class="actions" style="white-space:nowrap"><button class="btn sm" onclick="startEditItem(${it.id})">Edit</button>
-        <button class="btn sm danger" onclick="delItem(${it.id})">Del</button></td>`:''}</tr>`).join('')}
+        ${admin?`<td style="white-space:nowrap"><div class="actions"><button class="btn sm" onclick="startEditItem(${it.id})">Edit</button>
+        <button class="btn sm danger" onclick="delItem(${it.id})">Del</button></div></td>`:''}</tr>`).join('')}
       </tbody></table></div></div>`;
   let t;$('#itSearch').addEventListener('input',e=>{clearTimeout(t);t=setTimeout(()=>itemsView(e.target.value),300);});
   const xf=$('#xlsFile');if(xf)xf.addEventListener('change',handleExcel);
