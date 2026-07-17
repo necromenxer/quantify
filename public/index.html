@@ -525,7 +525,11 @@ async function cadView(){
   <div class="card">
     <h2>CAD Drawing Takeoff</h2>
     <p style="font-size:13px;color:var(--gray);margin-bottom:12px">Upload a <b>DXF</b> file (from AutoCAD, Revit, etc — use "Save As" / "Export" and choose DXF, since binary DWG files can't be read directly). The app measures wall length, electrical runs and network cable runs from the drawing's layers and suggests quantities. Treat results as a calculation aid — always check them against the drawing before finalizing a quantification.</p>
-    <input type="file" id="cadFile" accept=".dxf">
+    <div class="row2">
+      <div><label>Project Title</label><input id="cadTitle" placeholder="e.g. Block C Renovation"></div>
+      <div><label>Department</label><select id="cadDept">${DEPTS.map(d=>`<option ${d===(me.department||DEPTS[3])?'selected':''}>${d}</option>`).join('')}</select></div>
+    </div>
+    <label>DXF File</label><input type="file" id="cadFile" accept=".dxf">
     <button class="btn brand" onclick="cadAnalyze()">Analyze Drawing</button>
     <div class="err" id="cadErr"></div>
   </div>
@@ -633,27 +637,65 @@ function renderCadResult(){
       <td>${esc(it.suggested?it.suggested.unit:it.unit)}</td>
       <td style="font-size:12px;color:var(--gray)">${esc(it.detail)}</td>
     </tr>`).join('')}</tbody></table>
-    <button class="btn brand" onclick="cadAddToDraft()">Add checked items to draft quantification</button>
-    <p style="font-size:12px;color:var(--gray);margin-top:8px">This opens (or continues) your in-progress quantification draft with these lines added. You can still edit descriptions, quantities and rates, and match items to the master list, before saving.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+      <button class="btn brand" onclick="cadAddToDraft()">Add checked items to draft quantification</button>
+      <button class="btn" onclick="cadDownloadExcel()">Download as Excel</button>
+      <button class="btn" onclick="cadSaveQuantification()">Save as Quantification</button>
+    </div>
+    <div class="err" id="cadSaveErr"></div>
+    <p style="font-size:12px;color:var(--gray);margin-top:8px">"Add to draft" continues your in-progress quantification editor. "Save as Quantification" saves the checked items straight into a new quantification (using the Project Title / Department above) that shows up in the main list, ready to be checked, edited or deleted later. Either way, review descriptions, quantities and rates before finalizing.</p>
   </div>`;
 }
-function cadAddToDraft(){
-  const items=cadCalc.items;
-  const newLines=items.map((it,i)=>{
+function collectCheckedCadItems(){
+  return cadCalc.items.map((it,i)=>{
     if(!$('#cadChk'+i).checked)return null;
     const qty=Number($('#cadQty'+i).value)||0;
-    if(it.suggested)return{description:it.suggested.name,unit:it.suggested.unit,qty,rate:it.suggested.price};
-    return{description:it.label,unit:it.unit,qty,rate:''};
+    const description=it.suggested?it.suggested.name:it.label;
+    const unit=it.suggested?it.suggested.unit:it.unit;
+    const rate=it.suggested?it.suggested.price:'';
+    return{description,unit,qty,rate,detail:it.detail};
   }).filter(Boolean);
+}
+function cadAddToDraft(){
+  const newLines=collectCheckedCadItems().map(({description,unit,qty,rate})=>({description,unit,qty,rate}));
   if(!newLines.length){alert('No items checked.');return;}
   let d=loadDraft();
-  if(!d)d={title:'',department:me.department||DEPTS[3],gst_rate:8,checked_by:me.name,checked_designation:me.designation||'',approved_by:'',approved_designation:'',lines:[]};
+  if(!d)d={title:$('#cadTitle')?.value||'',department:$('#cadDept')?.value||me.department||DEPTS[3],gst_rate:8,checked_by:me.name,checked_designation:me.designation||'',approved_by:'',approved_designation:'',lines:[]};
+  else if(!d.title&&$('#cadTitle')?.value)d.title=$('#cadTitle').value;
   const existing=(d.lines||[]).filter(l=>l.description&&String(l.description).trim());
   d.lines=existing.concat(newLines);
   localStorage.setItem('qf_draft',JSON.stringify(d));
   document.querySelectorAll('#nav button').forEach(x=>x.classList.remove('active'));
   document.querySelector('#nav button[data-view="new"]').classList.add('active');
   editorView();
+}
+async function cadDownloadExcel(){
+  const checked=collectCheckedCadItems();
+  if(!checked.length){alert('No items checked.');return;}
+  const title=($('#cadTitle')?.value||'CAD Takeoff').trim();
+  try{
+    const XLSX=await loadXLSX();
+    const rows=[['Item','Quantity','Unit','Rate','Amount','Basis']];
+    checked.forEach(it=>rows.push([it.description,it.qty,it.unit,it.rate===''?'':it.rate,it.rate===''?'':Number((it.qty*it.rate).toFixed(2)),it.detail]));
+    const ws=XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols']=[{wch:34},{wch:10},{wch:8},{wch:10},{wch:12},{wch:70}];
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,ws,'CAD Takeoff');
+    XLSX.writeFile(wb,(title.replace(/[^a-zA-Z0-9 _-]+/g,'').trim()||'CAD-Takeoff')+'.xlsx');
+  }catch(e){$('#cadSaveErr').textContent=e.message;}
+}
+async function cadSaveQuantification(){
+  const title=($('#cadTitle')?.value||'').trim();
+  const department=$('#cadDept')?.value;
+  $('#cadSaveErr').textContent='';
+  if(!title){$('#cadSaveErr').textContent='Enter a Project Title at the top of the page first.';return;}
+  const lines=collectCheckedCadItems().map(({description,unit,qty,rate})=>({description,unit,qty,rate}));
+  if(!lines.length){$('#cadSaveErr').textContent='No items checked.';return;}
+  try{
+    const r=await api('/quantifications',{method:'POST',body:JSON.stringify({title,department,gst_rate:8,lines,
+      checked_by:me.name,checked_designation:me.designation||'',approved_by:'',approved_designation:''})});
+    editorView(r.id);
+  }catch(e){$('#cadSaveErr').textContent=e.message;}
 }
 
 // ---------- admin users ----------
