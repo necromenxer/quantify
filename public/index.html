@@ -52,7 +52,7 @@ footer{text-align:center;color:var(--gray);font-size:12px;padding:20px}
 dialog{border:none;border-radius:10px;padding:24px;max-width:480px;box-shadow:0 10px 40px rgba(0,0,0,.3)}
 dialog::backdrop{background:rgba(0,0,0,.4)}
 .hidden{display:none}
-.actions{display:flex;gap:6px}
+.actions{display:flex;gap:8px;padding-left:12px}
 .setgrid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
 @media(max-width:760px){.setgrid{grid-template-columns:1fr}}
 .sigbox{border:1px dashed #d1d5db;border-radius:8px;padding:14px;text-align:center;background:#fafafa}
@@ -438,10 +438,10 @@ async function itemsView(filter=''){
       <hr style="margin:16px 0;border:none;border-top:1px solid #e5e7eb">`:''}
     <label>Search</label><input id="itSearch" value="${esc(filter)}" placeholder="Type to filter...">
     <div style="margin-top:12px;max-height:480px;overflow-y:auto"><table>
-      <thead><tr><th>#</th><th>Item Name</th><th>Unit</th><th style="text-align:right">Price</th>${admin?'<th></th>':''}</tr></thead>
+      <thead><tr><th>#</th><th>Item Name</th><th>Unit</th><th style="text-align:right;padding-right:20px">Price</th>${admin?'<th style="width:150px"></th>':''}</tr></thead>
       <tbody>${items.map((it,i)=>`<tr><td>${i+1}</td><td>${esc(it.name)}</td><td>${esc(it.unit)}</td>
-        <td style="text-align:right">${fmt(it.price)}</td>
-        ${admin?`<td class="actions"><button class="btn sm" onclick="editItem(${it.id},'${esc(it.name).replace(/'/g,"\\'")}','${esc(it.unit)}',${it.price})">Edit</button>
+        <td style="text-align:right;padding-right:20px;white-space:nowrap">${fmt(it.price)}</td>
+        ${admin?`<td class="actions" style="white-space:nowrap"><button class="btn sm" onclick="editItem(${it.id},'${esc(it.name).replace(/'/g,"\\'")}','${esc(it.unit)}',${it.price})">Edit</button>
         <button class="btn sm danger" onclick="delItem(${it.id})">Del</button></td>`:''}</tr>`).join('')}
       </tbody></table></div></div>`;
   let t;$('#itSearch').addEventListener('input',e=>{clearTimeout(t);t=setTimeout(()=>itemsView(e.target.value),300);});
