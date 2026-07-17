@@ -816,7 +816,7 @@ function cadLegendFormHTML(prefix,lg,allLegends){
       <div><label>Output Unit</label><input id="${prefix}Unit" value="${esc(lg.output_unit)}" placeholder="m, m², m³, Nos"></div>
       <div><label>Waste / Overage %</label><input id="${prefix}Waste" type="number" step="any" value="${lg.waste_pct}"></div>
     </div>
-    <label>Detail / Spec (shown alongside the item — e.g. "2.5mm wire", "12mm thickness")</label><input id="${prefix}Detail" value="${esc(lg.detail||'')}">
+    <label>Detail / Spec — fallback note (e.g. "2.5mm wire", "12mm thickness") shown only when no Material is picked at takeoff time; once a Material is selected, its own name carries the spec instead</label><input id="${prefix}Detail" value="${esc(lg.detail||'')}">
 
     <div id="${prefix}FieldElevation" style="margin-top:14px;padding:12px;background:#f9fafb;border-radius:8px">
       <label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400"><input type="checkbox" id="${prefix}UseHeight" style="width:auto" ${lg.use_height?'checked':''} onchange="cadLegendFormToggle('${prefix}')"> This is a vertical run (a wall, fence, etc.) — derive its area from the drawn length × a height, instead of the raw drawn length/area</label>
