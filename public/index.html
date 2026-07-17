@@ -80,6 +80,7 @@ body.dark .totals .grand{border-color:#e5e7eb}
     <button data-view="list" class="active">Quantifications</button>
     <button data-view="new">+ New</button>
     <button data-view="items" id="navItems">Items</button>
+    <button data-view="cad" id="navCad">CAD Takeoff</button>
     <button data-view="users" id="navUsers">Users</button>
     <button data-view="audit" id="navAudit">Activity Log</button>
     <button data-view="settings">Settings</button>
@@ -247,7 +248,7 @@ async function boot(){
   $('#navAudit').style.display=me.role==='ADMIN'?'':'none';
   document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{
     document.querySelectorAll('#nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active');
-    ({list:listView,new:()=>editorView(),items:itemsView,users:usersView,audit:auditView,settings:settingsView})[b.dataset.view]();
+    ({list:listView,new:()=>editorView(),items:itemsView,cad:cadView,users:usersView,audit:auditView,settings:settingsView})[b.dataset.view]();
   });
   listView();
 }
@@ -513,6 +514,147 @@ async function editItem(id,name,unit,price){
   await api('/items/'+id,{method:'PUT',body:JSON.stringify({name:n,unit:u,price:Number(p)})});itemsView();
 }
 async function delItem(id){if(confirm('Remove this item from the master list?')){await api('/items/'+id,{method:'DELETE'});itemsView();}}
+
+// ---------- CAD drawing takeoff ----------
+let cadLayers=[],cadCalc=null,cadDefaults=null;
+async function cadView(){
+  cadLayers=[];cadCalc=null;
+  const d=await api('/cad/settings');
+  cadDefaults=d.settings||{};
+  main.innerHTML=`
+  <div class="card">
+    <h2>CAD Drawing Takeoff</h2>
+    <p style="font-size:13px;color:var(--gray);margin-bottom:12px">Upload a <b>DXF</b> file (from AutoCAD, Revit, etc — use "Save As" / "Export" and choose DXF, since binary DWG files can't be read directly). The app measures wall length, electrical runs and network cable runs from the drawing's layers and suggests quantities. Treat results as a calculation aid — always check them against the drawing before finalizing a quantification.</p>
+    <input type="file" id="cadFile" accept=".dxf">
+    <button class="btn brand" onclick="cadAnalyze()">Analyze Drawing</button>
+    <div class="err" id="cadErr"></div>
+  </div>
+  <div id="cadLayersArea"></div>
+  <div id="cadResultArea"></div>`;
+}
+async function cadAnalyze(){
+  const f=$('#cadFile').files[0];
+  $('#cadErr').textContent='';
+  if(!f){$('#cadErr').textContent='Choose a .dxf file first.';return;}
+  const fd=new FormData();fd.append('file',f);
+  try{
+    const r=await fetch('/api/cad/parse',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
+    const data=await r.json();
+    if(!r.ok)throw new Error(data.error||'Could not parse file');
+    cadLayers=data.layers;
+    $('#cadResultArea').innerHTML='';
+    renderCadLayers();
+  }catch(e){$('#cadErr').textContent=e.message;}
+}
+function renderCadLayers(){
+  const cats=['WALL','OPENING','ELECTRICAL','NETWORK','IGNORE'];
+  const s=cadDefaults||{};
+  $('#cadLayersArea').innerHTML=`<div class="card">
+    <h2>Detected Layers (${cadLayers.length})</h2>
+    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">Assign each layer to a category. Layers matching a previously saved default are pre-filled; unrecognized layers default to "Ignore".</p>
+    <div style="overflow-x:auto"><table><thead><tr><th>Layer</th><th>Entities</th><th>Raw Length</th><th style="width:150px">Category</th></tr></thead>
+    <tbody>${cadLayers.map((l,i)=>`<tr><td>${esc(l.name)}</td><td>${l.count}</td><td>${l.length}</td>
+      <td><select onchange="cadLayers[${i}].category=this.value">${cats.map(c=>`<option value="${c}" ${l.category===c?'selected':''}>${c[0]+c.slice(1).toLowerCase()}</option>`).join('')}</select></td></tr>`).join('')}
+    </tbody></table></div>
+    <h2 style="margin-top:20px">Parameters</h2>
+    <div class="row2">
+      <div><label>Drawing Unit</label><select id="cadUnit"><option value="mm" ${!s.drawingUnit||s.drawingUnit==='mm'?'selected':''}>Millimeters (mm)</option><option value="cm" ${s.drawingUnit==='cm'?'selected':''}>Centimeters (cm)</option><option value="m" ${s.drawingUnit==='m'?'selected':''}>Meters (m)</option><option value="ft" ${s.drawingUnit==='ft'?'selected':''}>Feet (ft)</option><option value="in" ${s.drawingUnit==='in'?'selected':''}>Inches (in)</option></select></div>
+      <div><label>Wall Height (m)</label><input id="cadWallH" type="number" step="any" value="${s.wallHeightM??3}"></div>
+      <div><label>Opening Height (m, blank = same as wall)</label><input id="cadOpenH" type="number" step="any" value="${s.openingHeightM??''}"></div>
+      <div><label>Waste / Overage %</label><input id="cadWaste" type="number" step="any" value="${s.wastePct??5}"></div>
+    </div>
+    <div class="row2" style="margin-top:8px">
+      <div><label>Wall Material</label><select id="cadMaterial" onchange="cadToggleMaterial()"><option value="brick" ${s.material!=='board'?'selected':''}>Bricks / Blocks</option><option value="board" ${s.material==='board'?'selected':''}>Boards / Sheets</option></select></div>
+      <div><label>Material Item Label</label><input id="cadMatLabel" value="${esc(s.materialLabel||'Bricks')}" placeholder="e.g. Bricks, Blocks, Plywood Boards"></div>
+    </div>
+    <div class="row2" id="cadBrickFields" ${s.material==='board'?'style="display:none"':''}>
+      <div><label>Brick/Block Length (mm)</label><input id="cadBrickL" type="number" step="any" value="${s.brickLengthMm??225}"></div>
+      <div><label>Brick/Block Height (mm)</label><input id="cadBrickH" type="number" step="any" value="${s.brickHeightMm??75}"></div>
+      <div><label>Mortar Joint (mm)</label><input id="cadMortar" type="number" step="any" value="${s.mortarMm??10}"></div>
+    </div>
+    <div class="row2" id="cadBoardFields" ${s.material==='board'?'':'style="display:none"'}>
+      <div><label>Board Width (m)</label><input id="cadBoardW" type="number" step="any" value="${s.boardWidthM??1.22}"></div>
+      <div><label>Board Height (m)</label><input id="cadBoardH" type="number" step="any" value="${s.boardHeightM??2.44}"></div>
+    </div>
+    <div class="row2" style="margin-top:8px">
+      <div><label>Electrical Wire Slack %</label><input id="cadElecSlack" type="number" step="any" value="${s.elecSlackPct??10}"></div>
+      <div><label>Network Cable Slack %</label><input id="cadNetSlack" type="number" step="any" value="${s.netSlackPct??10}"></div>
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;margin-top:14px;text-transform:none;font-weight:400"><input type="checkbox" id="cadRemember" style="width:auto" checked> Remember these layer categories and settings as defaults for next time</label>
+    <button class="btn brand" onclick="cadCalculate()">Calculate</button>
+    <div class="err" id="cadCalcErr"></div>
+  </div>`;
+}
+function cadToggleMaterial(){
+  const board=$('#cadMaterial').value==='board';
+  $('#cadBrickFields').style.display=board?'none':'';
+  $('#cadBoardFields').style.display=board?'':'none';
+}
+async function cadCalculate(){
+  const body={
+    layers:cadLayers,
+    drawingUnit:$('#cadUnit').value,
+    wallHeightM:$('#cadWallH').value,
+    openingHeightM:$('#cadOpenH').value,
+    wastePct:$('#cadWaste').value,
+    material:$('#cadMaterial').value,
+    materialLabel:$('#cadMatLabel').value,
+    brickLengthMm:$('#cadBrickL').value,
+    brickHeightMm:$('#cadBrickH').value,
+    mortarMm:$('#cadMortar').value,
+    boardWidthM:$('#cadBoardW').value,
+    boardHeightM:$('#cadBoardH').value,
+    elecSlackPct:$('#cadElecSlack').value,
+    netSlackPct:$('#cadNetSlack').value,
+  };
+  try{
+    cadCalc=await api('/cad/calculate',{method:'POST',body:JSON.stringify(body)});
+    renderCadResult();
+    if($('#cadRemember').checked){
+      const settings={drawingUnit:body.drawingUnit,wallHeightM:Number(body.wallHeightM),openingHeightM:body.openingHeightM?Number(body.openingHeightM):null,
+        wastePct:Number(body.wastePct),material:body.material,materialLabel:body.materialLabel,
+        brickLengthMm:Number(body.brickLengthMm),brickHeightMm:Number(body.brickHeightMm),mortarMm:Number(body.mortarMm),
+        boardWidthM:Number(body.boardWidthM),boardHeightM:Number(body.boardHeightM),
+        elecSlackPct:Number(body.elecSlackPct),netSlackPct:Number(body.netSlackPct)};
+      api('/cad/settings',{method:'PUT',body:JSON.stringify({settings,layerMap:cadLayers.map(l=>({name:l.name,category:l.category}))})}).catch(()=>{});
+    }
+  }catch(e){$('#cadCalcErr').textContent=e.message;}
+}
+function renderCadResult(){
+  const items=cadCalc.items;
+  if(!items.length){$('#cadResultArea').innerHTML='<div class="card"><p style="color:var(--gray)">No Wall, Electrical or Network layers were assigned, so there is nothing to calculate. Adjust the layer categories above and recalculate.</p></div>';return;}
+  $('#cadResultArea').innerHTML=`<div class="card">
+    <h2>Suggested Takeoff</h2>
+    <table><thead><tr><th style="width:26px"></th><th>Item</th><th style="width:110px">Quantity</th><th style="width:70px">Unit</th><th>Basis</th></tr></thead>
+    <tbody>${items.map((it,i)=>`<tr>
+      <td><input type="checkbox" id="cadChk${i}" checked style="width:auto"></td>
+      <td>${esc(it.suggested?it.suggested.name:it.label)}${it.suggested?' <span class="tag USER" style="font-size:10px">matched to master list</span>':''}</td>
+      <td><input id="cadQty${i}" type="number" step="any" value="${it.qty}"></td>
+      <td>${esc(it.suggested?it.suggested.unit:it.unit)}</td>
+      <td style="font-size:12px;color:var(--gray)">${esc(it.detail)}</td>
+    </tr>`).join('')}</tbody></table>
+    <button class="btn brand" onclick="cadAddToDraft()">Add checked items to draft quantification</button>
+    <p style="font-size:12px;color:var(--gray);margin-top:8px">This opens (or continues) your in-progress quantification draft with these lines added. You can still edit descriptions, quantities and rates, and match items to the master list, before saving.</p>
+  </div>`;
+}
+function cadAddToDraft(){
+  const items=cadCalc.items;
+  const newLines=items.map((it,i)=>{
+    if(!$('#cadChk'+i).checked)return null;
+    const qty=Number($('#cadQty'+i).value)||0;
+    if(it.suggested)return{description:it.suggested.name,unit:it.suggested.unit,qty,rate:it.suggested.price};
+    return{description:it.label,unit:it.unit,qty,rate:''};
+  }).filter(Boolean);
+  if(!newLines.length){alert('No items checked.');return;}
+  let d=loadDraft();
+  if(!d)d={title:'',department:me.department||DEPTS[3],gst_rate:8,checked_by:me.name,checked_designation:me.designation||'',approved_by:'',approved_designation:'',lines:[]};
+  const existing=(d.lines||[]).filter(l=>l.description&&String(l.description).trim());
+  d.lines=existing.concat(newLines);
+  localStorage.setItem('qf_draft',JSON.stringify(d));
+  document.querySelectorAll('#nav button').forEach(x=>x.classList.remove('active'));
+  document.querySelector('#nav button[data-view="new"]').classList.add('active');
+  editorView();
+}
 
 // ---------- admin users ----------
 async function usersView(){
