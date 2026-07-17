@@ -819,7 +819,7 @@ function cadLegendFormHTML(prefix,lg,allLegends){
     <label>Detail / Spec (shown alongside the item — e.g. "2.5mm wire", "12mm thickness")</label><input id="${prefix}Detail" value="${esc(lg.detail||'')}">
 
     <div id="${prefix}FieldElevation" style="margin-top:14px;padding:12px;background:#f9fafb;border-radius:8px">
-      <label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400"><input type="checkbox" id="${prefix}UseHeight" style="width:auto" ${lg.use_height?'checked':''} onchange="cadLegendFormToggle('${prefix}')"> This is a vertical run (a wall, fence, etc.) — convert its drawn length into a face area using a height, instead of a raw length</label>
+      <label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400"><input type="checkbox" id="${prefix}UseHeight" style="width:auto" ${lg.use_height?'checked':''} onchange="cadLegendFormToggle('${prefix}')"> This is a vertical run (a wall, fence, etc.) — derive its area from the drawn length × a height, instead of the raw drawn length/area</label>
       <div id="${prefix}FieldHeight" class="row2" style="margin-top:8px">
         <div><label>Default Height (m)</label><input id="${prefix}Height" type="number" step="any" value="${lg.height_m??''}" placeholder="e.g. 3"></div>
         <div><label>Net Openings From</label><div id="${prefix}NetsFrom" style="border:1px solid #d1d5db;border-radius:6px;padding:8px;max-height:120px;overflow-y:auto">
@@ -847,7 +847,7 @@ function cadLegendFormToggle(prefix){
   const type=$('#'+prefix+'Type').value;
   const useHeight=$('#'+prefix+'UseHeight').checked;
   const isOpening=$('#'+prefix+'IsOpening').checked;
-  $('#'+prefix+'FieldElevation').style.display=type==='LENGTH'?'':'none';
+  $('#'+prefix+'FieldElevation').style.display=type==='COUNT'?'none':'';
   $('#'+prefix+'FieldHeight').style.display=useHeight?'':'none';
   $('#'+prefix+'FieldOpenArea').style.display=(isOpening&&type==='COUNT')?'':'none';
 }
@@ -882,20 +882,22 @@ function cadLegendForm(legends){
     <div class="err" id="lgErr"></div>
   </div>`;
 }
-function cadLegendRow(lg,admin){
+function cadLegendRow(lg,admin,materials){
   const tags=[lg.use_height?'<span class="tag USER" style="font-size:10px">elevation</span>':'',lg.is_opening?'<span class="tag ADMIN" style="font-size:10px">opening</span>':''].filter(Boolean).join(' ');
+  const matList=(materials&&materials.length)?esc(materials.map(m=>m.name).join(', ')):'<span style="color:var(--gray)">none</span>';
   return `<tr><td>${esc(lg.name)} ${tags}</td><td>${lg.measure_type}</td><td>${esc(lg.output_unit)}</td><td>${lg.waste_pct}%</td><td style="font-size:12px;color:var(--gray)">${esc(lg.detail||'')}</td>
+  <td style="font-size:12px;color:var(--gray);max-width:200px">${matList}</td>
   ${admin?`<td style="white-space:nowrap"><div class="actions"><button class="btn sm" onclick="cadManageMaterials(${lg.id})">Materials</button><button class="btn sm" onclick="cadEditLegend(${lg.id})">Edit</button><button class="btn sm danger" onclick="cadDelLegend(${lg.id})">Del</button></div></td>`:''}</tr>`;
 }
 async function cadSettingsView(){
-  const legends=await api('/cad/legends');
+  const [legends,allMaterials]=await Promise.all([api('/cad/legends'),api('/cad/materials')]);
   const admin=me.role==='ADMIN';
   $('#cadSubArea').innerHTML=`
     <div id="cadSettingsTop"></div>
     <div class="card"><h2>Legend Library (${legends.length})</h2>
-    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">These are the tags available on the Drawing Takeoff page. Each legend defines how its quantity is measured: by length (optionally as a vertical run converted to a face area), area (optionally converted to a unit count or a volume), or count. "Materials" lets you offer specific priced options (tile sizes, block sizes...) to pick from at takeoff time.</p>
-    <div style="overflow-x:auto"><table><thead><tr><th>Name</th><th>Measure</th><th>Unit</th><th>Waste %</th><th>Detail</th>${admin?'<th style="width:220px"></th>':''}</tr></thead>
-    <tbody>${legends.map(lg=>cadLegendRow(lg,admin)).join('')}</tbody></table></div>
+    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">These are the tags available on the Drawing Takeoff page. Each legend defines how its quantity is measured: by length, area (optionally as a vertical run derived from length × height, and optionally converted to a unit count or a volume), or count. "Materials" lets you offer specific priced options (tile sizes, block sizes...) to pick from at takeoff time.</p>
+    <div style="overflow-x:auto"><table><thead><tr><th>Name</th><th>Measure</th><th>Unit</th><th>Waste %</th><th>Detail</th><th>Materials</th>${admin?'<th style="width:220px"></th>':''}</tr></thead>
+    <tbody>${legends.map(lg=>cadLegendRow(lg,admin,allMaterials.filter(m=>m.legend_id===lg.id))).join('')}</tbody></table></div>
     </div>`;
   if(!admin)return;
   if(cadSettingsMode==='materials'&&cadMaterialsLegend){
