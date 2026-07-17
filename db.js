@@ -83,6 +83,22 @@ CREATE TABLE IF NOT EXISTS cad_legends (
   coverage_wid_mm REAL,
   coverage_gap_mm REAL,
   thickness_mm REAL,
+  use_height INTEGER NOT NULL DEFAULT 0,
+  height_m REAL,
+  is_opening INTEGER NOT NULL DEFAULT 0,
+  opening_area_m2 REAL,
+  nets_from TEXT DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS cad_materials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  legend_id INTEGER NOT NULL REFERENCES cad_legends(id) ON DELETE CASCADE,
+  item_id INTEGER REFERENCES items(id),
+  name TEXT NOT NULL,
+  coverage_len_mm REAL,
+  coverage_wid_mm REAL,
+  coverage_gap_mm REAL,
+  thickness_mm REAL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );`;
   for (const s of stmts.split(';').map(x => x.trim()).filter(Boolean)) await client.execute(s);
@@ -92,6 +108,11 @@ CREATE TABLE IF NOT EXISTS cad_legends (
   try { await client.execute('ALTER TABLE users ADD COLUMN dob TEXT'); } catch {}
   try { await client.execute('ALTER TABLE users ADD COLUMN signature TEXT'); } catch {}
   try { await client.execute("ALTER TABLE quantifications ADD COLUMN source TEXT NOT NULL DEFAULT 'MANUAL'"); } catch {}
+  try { await client.execute('ALTER TABLE cad_legends ADD COLUMN use_height INTEGER NOT NULL DEFAULT 0'); } catch {}
+  try { await client.execute('ALTER TABLE cad_legends ADD COLUMN height_m REAL'); } catch {}
+  try { await client.execute('ALTER TABLE cad_legends ADD COLUMN is_opening INTEGER NOT NULL DEFAULT 0'); } catch {}
+  try { await client.execute('ALTER TABLE cad_legends ADD COLUMN opening_area_m2 REAL'); } catch {}
+  try { await client.execute("ALTER TABLE cad_legends ADD COLUMN nets_from TEXT DEFAULT '[]'"); } catch {}
 
   const legendCount = (await get('SELECT COUNT(*) c FROM cad_legends')).c;
   if (Number(legendCount) === 0) {
