@@ -562,9 +562,9 @@ async function cadQuantifyView(){
 }
 
 // ---- page 1: Drawing Takeoff ----
-let cadLayers=[],cadCalc=null,cadDefaults=null,cadLegendsAll=[],cadSelectedLegends=[],cadLegendDDEl=null;
+let cadLayers=[],cadCalc=null,cadDefaults=null,cadLegendsAll=[],cadSelectedLegends=[],cadLegendDDEl=null,cadDetectedUnit=null,cadMaterialsAll=[];
 async function cadTakeoffView(){
-  cadLayers=[];cadCalc=null;
+  cadLayers=[];cadCalc=null;cadDetectedUnit=null;cadMaterialsAll=[];
   const [d,legends]=await Promise.all([api('/cad/settings'),api('/cad/legends')]);
   cadDefaults=d.settings||{};
   cadLegendsAll=legends;
@@ -631,34 +631,71 @@ async function cadAnalyze(){
     const r=await fetch('/api/cad/parse',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
     const data=await r.json();
     if(!r.ok)throw new Error(data.error||'Could not parse file');
-    cadLayers=data.layers;
+    cadLayers=data.layers.map(l=>({...l,source:f.name}));
+    cadDetectedUnit=data.detectedUnit||null;
+    cadMaterialsAll=await api('/cad/materials');
     $('#cadResultArea').innerHTML='';
     renderCadLayers();
   }catch(e){$('#cadErr').textContent=e.message;}
 }
+async function cadAnalyzeMore(){
+  const f=$('#cadFileMore')?.files[0];
+  if(!f)return;
+  const fd=new FormData();fd.append('file',f);fd.append('legends',JSON.stringify(cadSelectedLegends));
+  try{
+    const r=await fetch('/api/cad/parse',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
+    const data=await r.json();
+    if(!r.ok)throw new Error(data.error||'Could not parse file');
+    cadLayers=cadLayers.concat(data.layers.map(l=>({...l,source:f.name})));
+    renderCadLayers();
+  }catch(e){alert(e.message);}
+}
 function renderCadLayers(){
   const s=cadDefaults||{};
   const options=['IGNORE',...cadSelectedLegends];
+  const defaultUnit=cadDetectedUnit||s.drawingUnit||'mm';
+  const engaged=[...new Set(cadLayers.filter(l=>l.legend).map(l=>l.legend))];
+  const engagedLegendRows=engaged.map(name=>cadLegendsAll.find(lg=>lg.name===name)).filter(Boolean);
   $('#cadLayersArea').innerHTML=`<div class="card">
     <h2>Detected Layers (${cadLayers.length})</h2>
     <p style="font-size:12px;color:var(--gray);margin-bottom:8px">Assign each layer to one of your selected legends. Layers matching a previously saved default, or whose name closely matches a legend, are pre-filled — check them before calculating.</p>
-    <div style="overflow-x:auto"><table><thead><tr><th>Layer</th><th>Entities</th><th>Length (raw)</th><th>Area (raw)</th><th style="width:200px">Legend</th></tr></thead>
-    <tbody>${cadLayers.map((l,i)=>`<tr><td>${esc(l.name)}</td><td>${l.count}</td><td>${fmt(l.length)}</td><td>${fmt(l.area)}</td>
-      <td><select onchange="cadLayers[${i}].legend=this.value==='IGNORE'?null:this.value">${options.map(o=>`<option value="${esc(o)}" ${(l.legend||'IGNORE')===o?'selected':''}>${esc(o)}</option>`).join('')}</select></td></tr>`).join('')}
+    <div style="overflow-x:auto"><table><thead><tr><th>Drawing</th><th>Layer</th><th>Entities</th><th>Length (raw)</th><th>Area (raw)</th><th style="width:200px">Legend</th></tr></thead>
+    <tbody>${cadLayers.map((l,i)=>`<tr><td style="font-size:11px;color:var(--gray)">${esc(l.source||'')}</td><td>${esc(l.name)}</td><td>${l.count}</td><td>${fmt(l.length)}</td><td>${fmt(l.area)}</td>
+      <td><select onchange="cadLayers[${i}].legend=this.value==='IGNORE'?null:this.value;renderCadLayers()">${options.map(o=>`<option value="${esc(o)}" ${(l.legend||'IGNORE')===o?'selected':''}>${esc(o)}</option>`).join('')}</select></td></tr>`).join('')}
     </tbody></table></div>
-    <h2 style="margin-top:20px">Parameters</h2>
-    <div class="row2">
-      <div><label>Drawing Unit</label><select id="cadUnit"><option value="mm" ${!s.drawingUnit||s.drawingUnit==='mm'?'selected':''}>Millimeters (mm)</option><option value="cm" ${s.drawingUnit==='cm'?'selected':''}>Centimeters (cm)</option><option value="m" ${s.drawingUnit==='m'?'selected':''}>Meters (m)</option><option value="ft" ${s.drawingUnit==='ft'?'selected':''}>Feet (ft)</option><option value="in" ${s.drawingUnit==='in'?'selected':''}>Inches (in)</option></select></div>
+    <div style="margin-top:14px">
+      <label>Add Another Drawing <span style="font-weight:400;text-transform:none;color:var(--gray)">(optional — combine multiple floor plans into one takeoff)</span></label>
+      <div style="display:flex;gap:8px;align-items:center"><input type="file" id="cadFileMore" accept=".dxf" style="flex:1"><button class="btn" onclick="cadAnalyzeMore()">Add</button></div>
     </div>
+    <h2 style="margin-top:20px">Drawing Unit</h2>
+    <div class="row2">
+      <div><label>Drawing Unit</label><select id="cadUnit"><option value="mm" ${defaultUnit==='mm'?'selected':''}>Millimeters (mm)</option><option value="cm" ${defaultUnit==='cm'?'selected':''}>Centimeters (cm)</option><option value="m" ${defaultUnit==='m'?'selected':''}>Meters (m)</option><option value="ft" ${defaultUnit==='ft'?'selected':''}>Feet (ft)</option><option value="in" ${defaultUnit==='in'?'selected':''}>Inches (in)</option></select>
+      ${cadDetectedUnit?`<p style="font-size:12px;color:var(--ok);margin-top:4px">Detected from the file itself and pre-selected below — double-check it still looks right.</p>`:`<p style="font-size:12px;color:var(--gray);margin-top:4px">Couldn't read a unit from the file — pre-filled from your last-used setting, please confirm it.</p>`}
+      </div>
+    </div>
+    ${engagedLegendRows.length?`<h2 style="margin-top:20px">Height & Materials</h2>
+    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">For wall/fence-type legends measured as a vertical run, set the height used to work out the face area they cover. Where you've set up specific materials for a legend under Takeoff Settings, pick which one this drawing uses — its exact spec and price come along automatically.</p>
+    ${engagedLegendRows.map((lg,i)=>{
+      const mats=(cadMaterialsAll||[]).filter(m=>m.legend_id===lg.id);
+      if(!lg.use_height&&!mats.length)return '';
+      return `<div class="row2" style="margin-bottom:8px">
+        ${lg.use_height?`<div><label>${esc(lg.name)} — Height (m)</label><input id="cadHeight_${i}" data-legend="${esc(lg.name)}" type="number" step="any" value="${lg.height_m??3}"></div>`:'<div></div>'}
+        ${mats.length?`<div><label>${esc(lg.name)} — Material</label><select id="cadMat_${i}" data-legend="${esc(lg.name)}"><option value="">Use legend default</option>${mats.map(m=>`<option value="${m.id}">${esc(m.name)}${m.item_name?' — '+esc(m.item_name):''}</option>`).join('')}</select></div>`:'<div></div>'}
+      </div>`;
+    }).join('')}`:''}
     <label style="display:flex;align-items:center;gap:6px;margin-top:14px;text-transform:none;font-weight:400"><input type="checkbox" id="cadRemember" style="width:auto" checked> Remember these layer-legend assignments as defaults for next time</label>
     <button class="btn brand" onclick="cadCalculate()">Calculate</button>
     <div class="err" id="cadCalcErr"></div>
   </div>`;
 }
 async function cadCalculate(){
+  const legendHeights={},legendMaterials={};
+  document.querySelectorAll('[id^="cadHeight_"]').forEach(inp=>{legendHeights[inp.dataset.legend]=inp.value;});
+  document.querySelectorAll('[id^="cadMat_"]').forEach(sel=>{if(sel.value)legendMaterials[sel.dataset.legend]=sel.value;});
   const body={
     layers:cadLayers.map(l=>({name:l.name,legend:l.legend,length:l.length,area:l.area,count:l.count})),
     drawingUnit:$('#cadUnit').value,
+    legendHeights, legendMaterials,
   };
   try{
     cadCalc=await api('/cad/calculate',{method:'POST',body:JSON.stringify(body)});
@@ -760,17 +797,19 @@ async function cadListView(){
   </tbody></table></div>`;
 }
 
-// ---- page 3: Takeoff Settings (legend library) ----
-let cadLegendEditId=null;
-function cadLegendFormHTML(prefix,lg){
-  lg=lg||{name:'',measure_type:'LENGTH',output_unit:'m',waste_pct:5,detail:'',coverage_len_mm:'',coverage_wid_mm:'',coverage_gap_mm:'',thickness_mm:''};
+// ---- page 3: Takeoff Settings (legend library + materials) ----
+let cadLegendEditId=null,cadSettingsMode='legend',cadMaterialsLegend=null,cadMatEditId=null,cadMatItemPick=null,matItemDDEl=null;
+function cadLegendFormHTML(prefix,lg,allLegends){
+  lg=lg||{name:'',measure_type:'LENGTH',output_unit:'m',waste_pct:5,detail:'',coverage_len_mm:'',coverage_wid_mm:'',coverage_gap_mm:'',thickness_mm:'',use_height:0,height_m:'',is_opening:0,opening_area_m2:'',nets_from:'[]'};
+  let netsFrom=[]; try{netsFrom=JSON.parse(lg.nets_from||'[]');}catch{netsFrom=[];}
+  const openingCandidates=(allLegends||[]).filter(o=>o.is_opening&&o.name!==lg.name);
   return `
     <div class="row2">
-      <div><label>Legend Name</label><input id="${prefix}Name" value="${esc(lg.name)}" placeholder="e.g. ROOF INSULATION"></div>
-      <div><label>Measure Type</label><select id="${prefix}Type">
-        <option value="LENGTH" ${lg.measure_type==='LENGTH'?'selected':''}>Length (e.g. cabling, fencing, pipe)</option>
+      <div><label>Legend Name</label><input id="${prefix}Name" value="${esc(lg.name)}" placeholder="e.g. WALL - BLOCKWORK"></div>
+      <div><label>Measure Type</label><select id="${prefix}Type" onchange="cadLegendFormToggle('${prefix}')">
+        <option value="LENGTH" ${lg.measure_type==='LENGTH'?'selected':''}>Length (e.g. cabling, fencing, wall run, pipe)</option>
         <option value="AREA" ${lg.measure_type==='AREA'?'selected':''}>Area (e.g. flooring, roofing, painting)</option>
-        <option value="COUNT" ${lg.measure_type==='COUNT'?'selected':''}>Count (e.g. sockets, lights, fans)</option>
+        <option value="COUNT" ${lg.measure_type==='COUNT'?'selected':''}>Count (e.g. sockets, lights, fans, doors, windows)</option>
       </select></div>
     </div>
     <div class="row2" style="margin-top:8px">
@@ -778,7 +817,23 @@ function cadLegendFormHTML(prefix,lg){
       <div><label>Waste / Overage %</label><input id="${prefix}Waste" type="number" step="any" value="${lg.waste_pct}"></div>
     </div>
     <label>Detail / Spec (shown alongside the item — e.g. "2.5mm wire", "12mm thickness")</label><input id="${prefix}Detail" value="${esc(lg.detail||'')}">
-    <p style="font-size:12px;color:var(--gray);margin-top:12px">Optional, Area-type legends only: fill Coverage Length/Width to convert area into a unit count (e.g. tiles, bricks, boards), OR fill Thickness to convert area into a volume (e.g. concrete, excavation). Leave all blank to keep the raw area.</p>
+
+    <div id="${prefix}FieldElevation" style="margin-top:14px;padding:12px;background:#f9fafb;border-radius:8px">
+      <label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400"><input type="checkbox" id="${prefix}UseHeight" style="width:auto" ${lg.use_height?'checked':''} onchange="cadLegendFormToggle('${prefix}')"> This is a vertical run (a wall, fence, etc.) — convert its drawn length into a face area using a height, instead of a raw length</label>
+      <div id="${prefix}FieldHeight" class="row2" style="margin-top:8px">
+        <div><label>Default Height (m)</label><input id="${prefix}Height" type="number" step="any" value="${lg.height_m??''}" placeholder="e.g. 3"></div>
+        <div><label>Net Openings From</label><div id="${prefix}NetsFrom" style="border:1px solid #d1d5db;border-radius:6px;padding:8px;max-height:120px;overflow-y:auto">
+          ${openingCandidates.length?openingCandidates.map(o=>`<label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400;font-size:13px;padding:2px 0"><input type="checkbox" value="${esc(o.name)}" style="width:auto" ${netsFrom.includes(o.name)?'checked':''}> ${esc(o.name)}</label>`).join(''):'<span style="font-size:12px;color:var(--gray)">No legends are marked as an "opening" yet — mark e.g. DOORS or WINDOWS as one below to net them out here.</span>'}
+        </div></div>
+      </div>
+    </div>
+
+    <div style="margin-top:14px;padding:12px;background:#f9fafb;border-radius:8px">
+      <label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400"><input type="checkbox" id="${prefix}IsOpening" style="width:auto" ${lg.is_opening?'checked':''} onchange="cadLegendFormToggle('${prefix}')"> This legend is an opening (doors, windows...) that other vertical-run legends can subtract</label>
+      <div id="${prefix}FieldOpenArea" style="margin-top:8px"><label>Typical Opening Size (m² each, used only for netting)</label><input id="${prefix}OpenArea" type="number" step="any" value="${lg.opening_area_m2??''}" placeholder="e.g. 1.89 for a 0.9m x 2.1m door"></div>
+    </div>
+
+    <p style="font-size:12px;color:var(--gray);margin-top:12px">Optional, for Area-type legends (or Length-type with the vertical-run box above checked): fill Coverage Length/Width to convert the area into a unit count (e.g. tiles, bricks, boards), OR fill Thickness to convert it into a volume (e.g. concrete, excavation, plaster). These are also this legend's <b>default</b> spec — a specific Material chosen at takeoff time (below, once saved) overrides them. Leave all blank to keep the raw area.</p>
     <div class="row2">
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
         <div><label>Coverage Length (mm)</label><input id="${prefix}CovL" type="number" step="any" value="${lg.coverage_len_mm??''}"></div>
@@ -788,7 +843,16 @@ function cadLegendFormHTML(prefix,lg){
       <div><label>Thickness (mm)</label><input id="${prefix}Thick" type="number" step="any" value="${lg.thickness_mm??''}"></div>
     </div>`;
 }
+function cadLegendFormToggle(prefix){
+  const type=$('#'+prefix+'Type').value;
+  const useHeight=$('#'+prefix+'UseHeight').checked;
+  const isOpening=$('#'+prefix+'IsOpening').checked;
+  $('#'+prefix+'FieldElevation').style.display=type==='LENGTH'?'':'none';
+  $('#'+prefix+'FieldHeight').style.display=useHeight?'':'none';
+  $('#'+prefix+'FieldOpenArea').style.display=(isOpening&&type==='COUNT')?'':'none';
+}
 function cadLegendFormData(prefix){
+  const netsFrom=[...document.querySelectorAll('#'+prefix+'NetsFrom input[type=checkbox]:checked')].map(c=>c.value);
   return {
     name:$('#'+prefix+'Name').value,
     measure_type:$('#'+prefix+'Type').value,
@@ -799,13 +863,18 @@ function cadLegendFormData(prefix){
     coverage_wid_mm:$('#'+prefix+'CovW').value,
     coverage_gap_mm:$('#'+prefix+'CovG').value,
     thickness_mm:$('#'+prefix+'Thick').value,
+    use_height:$('#'+prefix+'UseHeight').checked,
+    height_m:$('#'+prefix+'Height').value,
+    is_opening:$('#'+prefix+'IsOpening').checked,
+    opening_area_m2:$('#'+prefix+'OpenArea').value,
+    nets_from:netsFrom,
   };
 }
 function cadLegendForm(legends){
   const editing=cadLegendEditId?legends.find(l=>l.id===cadLegendEditId):null;
   return `<div class="card">
     <h2>${editing?'Edit Legend — '+esc(editing.name):'Add Legend'}</h2>
-    ${cadLegendFormHTML('lg',editing)}
+    ${cadLegendFormHTML('lg',editing,legends)}
     <div style="display:flex;gap:8px;margin-top:10px">
       <button class="btn brand" onclick="${editing?'cadSaveLegend('+editing.id+')':'cadAddLegend()'}">${editing?'Save Changes':'Add Legend'}</button>
       ${editing?'<button class="btn" onclick="cadLegendEditId=null;cadSettingsView()">Cancel</button>':''}
@@ -814,26 +883,35 @@ function cadLegendForm(legends){
   </div>`;
 }
 function cadLegendRow(lg,admin){
-  return `<tr><td>${esc(lg.name)}</td><td>${lg.measure_type}</td><td>${esc(lg.output_unit)}</td><td>${lg.waste_pct}%</td><td style="font-size:12px;color:var(--gray)">${esc(lg.detail||'')}</td>
-  ${admin?`<td style="white-space:nowrap"><div class="actions"><button class="btn sm" onclick="cadEditLegend(${lg.id})">Edit</button><button class="btn sm danger" onclick="cadDelLegend(${lg.id})">Del</button></div></td>`:''}</tr>`;
+  const tags=[lg.use_height?'<span class="tag USER" style="font-size:10px">elevation</span>':'',lg.is_opening?'<span class="tag ADMIN" style="font-size:10px">opening</span>':''].filter(Boolean).join(' ');
+  return `<tr><td>${esc(lg.name)} ${tags}</td><td>${lg.measure_type}</td><td>${esc(lg.output_unit)}</td><td>${lg.waste_pct}%</td><td style="font-size:12px;color:var(--gray)">${esc(lg.detail||'')}</td>
+  ${admin?`<td style="white-space:nowrap"><div class="actions"><button class="btn sm" onclick="cadManageMaterials(${lg.id})">Materials</button><button class="btn sm" onclick="cadEditLegend(${lg.id})">Edit</button><button class="btn sm danger" onclick="cadDelLegend(${lg.id})">Del</button></div></td>`:''}</tr>`;
 }
 async function cadSettingsView(){
   const legends=await api('/cad/legends');
   const admin=me.role==='ADMIN';
   $('#cadSubArea').innerHTML=`
-    ${admin?cadLegendForm(legends):''}
+    <div id="cadSettingsTop"></div>
     <div class="card"><h2>Legend Library (${legends.length})</h2>
-    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">These are the tags available on the Drawing Takeoff page. Each legend defines how its quantity is measured: by length, area (optionally converted to a unit count or a volume), or count.</p>
-    <div style="overflow-x:auto"><table><thead><tr><th>Name</th><th>Measure</th><th>Unit</th><th>Waste %</th><th>Detail</th>${admin?'<th style="width:150px"></th>':''}</tr></thead>
+    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">These are the tags available on the Drawing Takeoff page. Each legend defines how its quantity is measured: by length (optionally as a vertical run converted to a face area), area (optionally converted to a unit count or a volume), or count. "Materials" lets you offer specific priced options (tile sizes, block sizes...) to pick from at takeoff time.</p>
+    <div style="overflow-x:auto"><table><thead><tr><th>Name</th><th>Measure</th><th>Unit</th><th>Waste %</th><th>Detail</th>${admin?'<th style="width:220px"></th>':''}</tr></thead>
     <tbody>${legends.map(lg=>cadLegendRow(lg,admin)).join('')}</tbody></table></div>
     </div>`;
+  if(!admin)return;
+  if(cadSettingsMode==='materials'&&cadMaterialsLegend){
+    await cadRenderMaterials();
+  }else{
+    cadSettingsMode='legend';
+    $('#cadSettingsTop').innerHTML=cadLegendForm(legends);
+    cadLegendFormToggle('lg');
+  }
 }
 async function cadAddLegend(){
   const d=cadLegendFormData('lg');
   try{await api('/cad/legends',{method:'POST',body:JSON.stringify(d)});cadSettingsView();}
   catch(e){$('#lgErr').textContent=e.message;}
 }
-function cadEditLegend(id){cadLegendEditId=id;cadSettingsView();window.scrollTo(0,0);}
+function cadEditLegend(id){cadLegendEditId=id;cadSettingsMode='legend';cadSettingsView();window.scrollTo(0,0);}
 async function cadDelLegend(id){
   if(!confirm('Delete this legend? Quantifications already created from it will be unaffected.'))return;
   await api('/cad/legends/'+id,{method:'DELETE'});
@@ -843,6 +921,113 @@ async function cadSaveLegend(id){
   const d=cadLegendFormData('lg');
   try{await api('/cad/legends/'+id,{method:'PUT',body:JSON.stringify(d)});cadLegendEditId=null;cadSettingsView();}
   catch(e){$('#lgErr').textContent=e.message;}
+}
+
+// -- materials (per legend) --
+async function cadManageMaterials(legendId){
+  const legends=await api('/cad/legends');
+  cadMaterialsLegend=legends.find(l=>l.id===legendId);
+  cadSettingsMode='materials';cadMatEditId=null;cadMatItemPick=null;
+  cadSettingsView();
+  window.scrollTo(0,0);
+}
+function cadMaterialFormHTML(){
+  return `
+    <div class="row2">
+      <div><label>Material Name</label><input id="matName" placeholder="e.g. 300x300 Ceramic Tile"></div>
+      <div><label>Linked Master Item (for price/unit)</label>
+        <div style="position:relative"><input id="matItemSearch" placeholder="Search master items..." autocomplete="off"></div>
+        <div id="matItemPicked" style="font-size:12px;color:var(--gray);margin-top:4px"></div>
+      </div>
+    </div>
+    <div class="row2" style="margin-top:8px">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+        <div><label>Coverage Length (mm)</label><input id="matCovL" type="number" step="any"></div>
+        <div><label>Coverage Width (mm)</label><input id="matCovW" type="number" step="any"></div>
+        <div><label>Coverage Gap (mm)</label><input id="matCovG" type="number" step="any"></div>
+      </div>
+      <div><label>Thickness (mm)</label><input id="matThick" type="number" step="any"></div>
+    </div>
+    <p style="font-size:12px;color:var(--gray);margin-top:8px">Fill Coverage L/W for a material that converts a face/floor area into a unit count (tiles, blocks, boards). Fill Thickness instead for one that converts area into a volume (concrete, screed). Leave both blank to just override the item/price for a raw length or count legend.</p>`;
+}
+function cadMaterialRow(m){
+  const spec=m.coverage_len_mm&&m.coverage_wid_mm?`${m.coverage_len_mm}×${m.coverage_wid_mm}mm coverage`:m.thickness_mm?`${m.thickness_mm}mm thickness`:'—';
+  return `<tr><td>${esc(m.name)}</td><td style="font-size:12px;color:var(--gray)">${spec}</td>
+  <td>${m.item_name?esc(m.item_name):'<span style="color:var(--gray)">none</span>'}</td><td>${m.item_price!=null?fmt(m.item_price):''}</td>
+  <td style="white-space:nowrap"><div class="actions"><button class="btn sm" onclick="cadEditMaterial(${m.id})">Edit</button><button class="btn sm danger" onclick="cadDelMaterial(${m.id})">Del</button></div></td></tr>`;
+}
+async function cadRenderMaterials(){
+  const lg=cadMaterialsLegend;
+  const materials=await api('/cad/materials?legend_id='+lg.id);
+  const editing=cadMatEditId?materials.find(m=>m.id===cadMatEditId):null;
+  $('#cadSettingsTop').innerHTML=`<div class="card">
+    <h2>Materials — ${esc(lg.name)}</h2>
+    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">Each material is a concrete option for this legend (e.g. a specific tile or block size), linked to a priced master item. At takeoff time you'll pick one of these per drawing; if none is picked, the legend's own default coverage/thickness (Edit Legend) is used instead.</p>
+    <div style="overflow-x:auto"><table><thead><tr><th>Name</th><th>Spec</th><th>Linked Item</th><th>Price</th><th style="width:120px"></th></tr></thead>
+    <tbody>${materials.map(m=>cadMaterialRow(m)).join('')||'<tr><td colspan="5" style="color:#999">No materials yet.</td></tr>'}</tbody></table></div>
+    <h2 style="margin-top:20px">${editing?'Edit Material — '+esc(editing.name):'Add Material'}</h2>
+    ${cadMaterialFormHTML()}
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="btn brand" onclick="${editing?'cadSaveMaterial('+editing.id+')':'cadAddMaterial()'}">${editing?'Save Changes':'Add Material'}</button>
+      ${editing?'<button class="btn" onclick="cadMatEditId=null;cadMatItemPick=null;cadRenderMaterials()">Cancel Edit</button>':''}
+      <button class="btn" onclick="cadSettingsMode='legend';cadMaterialsLegend=null;cadMatEditId=null;cadMatItemPick=null;cadSettingsView()">Back to Legends</button>
+    </div>
+    <div class="err" id="matErr"></div>
+  </div>`;
+  if(editing){
+    $('#matName').value=editing.name;
+    $('#matCovL').value=editing.coverage_len_mm??'';
+    $('#matCovW').value=editing.coverage_wid_mm??'';
+    $('#matCovG').value=editing.coverage_gap_mm??'';
+    $('#matThick').value=editing.thickness_mm??'';
+    if(editing.item_id){cadMatItemPick={id:editing.item_id,name:editing.item_name,unit:editing.item_unit,price:editing.item_price};$('#matItemSearch').value=editing.item_name||'';$('#matItemPicked').textContent='Linked: '+editing.item_name+' ('+editing.item_unit+', '+fmt(editing.item_price)+')';}
+    else cadMatItemPick=null;
+  }else if(cadMatItemPick){
+    $('#matItemSearch').value=cadMatItemPick.name;
+    $('#matItemPicked').textContent='Linked: '+cadMatItemPick.name+' ('+cadMatItemPick.unit+', '+fmt(cadMatItemPick.price)+')';
+  }
+  const inp=$('#matItemSearch');
+  if(inp){inp.addEventListener('input',showMatItemDD);inp.addEventListener('focus',showMatItemDD);inp.addEventListener('blur',()=>setTimeout(closeMatItemDD,180));}
+}
+async function showMatItemDD(){
+  const q=$('#matItemSearch').value.trim();
+  closeMatItemDD();
+  if(q.length<2)return;
+  const results=await api('/items?q='+encodeURIComponent(q));
+  if(!results.length)return;
+  const rc=$('#matItemSearch').getBoundingClientRect();
+  matItemDDEl=document.createElement('div');
+  matItemDDEl.className='dd-list';
+  matItemDDEl.style.position='fixed';matItemDDEl.style.left=rc.left+'px';matItemDDEl.style.top=(rc.bottom+2)+'px';matItemDDEl.style.width=rc.width+'px';matItemDDEl.style.zIndex=50;
+  matItemDDEl.innerHTML=results.map(it=>`<div data-id="${it.id}"><span>${esc(it.name)}</span><small>${esc(it.unit)} · ${fmt(it.price)}</small></div>`).join('');
+  matItemDDEl.querySelectorAll('div[data-id]').forEach(d=>d.addEventListener('mousedown',e=>{
+    e.preventDefault();
+    const it=results.find(x=>x.id===+d.dataset.id);
+    cadMatItemPick=it;
+    $('#matItemSearch').value=it.name;
+    $('#matItemPicked').textContent='Linked: '+it.name+' ('+it.unit+', '+fmt(it.price)+')';
+    closeMatItemDD();
+  }));
+  document.body.appendChild(matItemDDEl);
+}
+function closeMatItemDD(){if(matItemDDEl){matItemDDEl.remove();matItemDDEl=null;}}
+async function cadAddMaterial(){
+  const d={legend_id:cadMaterialsLegend.id,item_id:cadMatItemPick?cadMatItemPick.id:null,name:$('#matName').value,
+    coverage_len_mm:$('#matCovL').value,coverage_wid_mm:$('#matCovW').value,coverage_gap_mm:$('#matCovG').value,thickness_mm:$('#matThick').value};
+  try{await api('/cad/materials',{method:'POST',body:JSON.stringify(d)});cadMatItemPick=null;cadRenderMaterials();}
+  catch(e){$('#matErr').textContent=e.message;}
+}
+function cadEditMaterial(id){cadMatEditId=id;cadRenderMaterials();window.scrollTo(0,0);}
+async function cadSaveMaterial(id){
+  const d={item_id:cadMatItemPick?cadMatItemPick.id:null,name:$('#matName').value,
+    coverage_len_mm:$('#matCovL').value,coverage_wid_mm:$('#matCovW').value,coverage_gap_mm:$('#matCovG').value,thickness_mm:$('#matThick').value};
+  try{await api('/cad/materials/'+id,{method:'PUT',body:JSON.stringify(d)});cadMatEditId=null;cadMatItemPick=null;cadRenderMaterials();}
+  catch(e){$('#matErr').textContent=e.message;}
+}
+async function cadDelMaterial(id){
+  if(!confirm('Delete this material?'))return;
+  await api('/cad/materials/'+id,{method:'DELETE'});
+  cadRenderMaterials();
 }
 
 // ---------- admin users ----------
