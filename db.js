@@ -71,6 +71,19 @@ CREATE TABLE IF NOT EXISTS cad_layers (
 CREATE TABLE IF NOT EXISTS cad_settings (
   key TEXT PRIMARY KEY,
   value TEXT
+);
+CREATE TABLE IF NOT EXISTS cad_legends (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  measure_type TEXT NOT NULL DEFAULT 'LENGTH',
+  output_unit TEXT NOT NULL DEFAULT 'm',
+  detail TEXT DEFAULT '',
+  waste_pct REAL NOT NULL DEFAULT 5,
+  coverage_len_mm REAL,
+  coverage_wid_mm REAL,
+  coverage_gap_mm REAL,
+  thickness_mm REAL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );`;
   for (const s of stmts.split(';').map(x => x.trim()).filter(Boolean)) await client.execute(s);
   // migration: designation column for users (ignore if it already exists)
@@ -78,6 +91,41 @@ CREATE TABLE IF NOT EXISTS cad_settings (
   try { await client.execute('ALTER TABLE users ADD COLUMN phone TEXT'); } catch {}
   try { await client.execute('ALTER TABLE users ADD COLUMN dob TEXT'); } catch {}
   try { await client.execute('ALTER TABLE users ADD COLUMN signature TEXT'); } catch {}
+  try { await client.execute("ALTER TABLE quantifications ADD COLUMN source TEXT NOT NULL DEFAULT 'MANUAL'"); } catch {}
+
+  const legendCount = (await get('SELECT COUNT(*) c FROM cad_legends')).c;
+  if (Number(legendCount) === 0) {
+    const seed = [
+      ['FIRE', 'COUNT', 'Nos', '', 5],
+      ['PLUMBING', 'LENGTH', 'm', '', 10],
+      ['ROOFING - WOODEN', 'AREA', 'm²', '', 10],
+      ['ROOFING - STEEL', 'AREA', 'm²', '', 10],
+      ['ROOF INSULATION', 'AREA', 'm²', '', 10],
+      ['FIX CIELING', 'AREA', 'm²', '', 10],
+      ['SUSPENDED CIELING', 'AREA', 'm²', '', 10],
+      ['STEEL FENCING', 'LENGTH', 'm', '', 5],
+      ['WOODEN FENCING', 'LENGTH', 'm', '', 5],
+      ['CONCRETE', 'AREA', 'm²', 'Set a thickness (mm) in this legend to switch the output to m³', 10],
+      ['ELECTRICAL MAIN CABLE', 'LENGTH', 'm', '', 10],
+      ['SUB CABLES - LIGHTS', 'LENGTH', 'm', '', 10],
+      ['SUB CABLES - SOCKETS', 'LENGTH', 'm', '2.5mm wire', 10],
+      ['SUB CABLES', 'LENGTH', 'm', '', 10],
+      ['SOCKETS', 'COUNT', 'Nos', '', 5],
+      ['LIGHTS', 'COUNT', 'Nos', '', 5],
+      ['FANS', 'COUNT', 'Nos', '', 5],
+      ['EXCAVATION', 'AREA', 'm²', 'Set a thickness (mm, i.e. depth) in this legend to switch the output to m³', 10],
+      ['PARQUET FLOORING', 'AREA', 'm²', '', 10],
+      ['TILE FLOORING', 'AREA', 'm²', '', 10],
+      ['WALL TILE', 'AREA', 'm²', '', 10],
+      ['CEMENT SCREEDING', 'AREA', 'm²', '', 10],
+      ['PAINTING', 'AREA', 'm²', '', 10],
+      ['NETWORK CABLE', 'LENGTH', 'm', '', 10],
+    ];
+    for (const [name, measure_type, output_unit, detail, waste_pct] of seed) {
+      await run('INSERT INTO cad_legends (name, measure_type, output_unit, detail, waste_pct) VALUES (?,?,?,?,?)', [name, measure_type, output_unit, detail, waste_pct]);
+    }
+    console.log('Seeded ' + seed.length + ' CAD legends');
+  }
 
   const itemCount = (await get('SELECT COUNT(*) c FROM items')).c;
   if (Number(itemCount) === 0) {

@@ -126,17 +126,9 @@ async function similarItems(name) {
 }
 
 // ---------- CAD drawing takeoff ----------
-const CAD_CATEGORIES = ['WALL', 'OPENING', 'ELECTRICAL', 'NETWORK', 'IGNORE'];
 const CAD_UNIT_FACTORS = { mm: 0.001, cm: 0.01, m: 1, ft: 0.3048, in: 0.0254 };
+const CAD_MEASURE_TYPES = ['LENGTH', 'AREA', 'COUNT'];
 
-function cadGuessCategory(name) {
-  const n = String(name || '').toUpperCase();
-  if (/DOOR|WINDOW|OPENING/.test(n)) return 'OPENING';
-  if (/WALL|PARTITION/.test(n)) return 'WALL';
-  if (/ELEC|POWER|LIGHT|LTG/.test(n)) return 'ELECTRICAL';
-  if (/NET|DATA|LAN|COMM|TEL|IT[-_]/.test(n)) return 'NETWORK';
-  return 'IGNORE';
-}
 function cadDist(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2); }
 function cadEntityLength(e) {
   const verts = e.vertices || [];
@@ -146,8 +138,73 @@ function cadEntityLength(e) {
   if (e.shape) len += cadDist(verts[verts.length - 1], verts[0]); // closed polyline
   return len;
 }
+// shoelace formula; only meaningful for closed polylines
+function cadPolygonArea(e) {
+  const verts = e.vertices || [];
+  if (!e.shape || verts.length < 3) return 0;
+  let area = 0;
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i], b = verts[(i + 1) % verts.length];
+    area += a.x * b.y - b.x * a.y;
+  }
+  return Math.abs(area) / 2;
+}
+// fuzzy word-overlap match between a CAD layer name and a legend name
+function cadNameMatch(layerName, legendName) {
+  const norm = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, ' ').trim();
+  const a = norm(layerName), b = norm(legendName);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const wa = a.split(' ').filter(Boolean), wb = b.split(' ').filter(Boolean);
+  if (!wa.length || !wb.length) return false;
+  const hits = wb.filter(w => wa.includes(w)).length;
+  return hits / wb.length >= 0.8;
+}
+function cadGuessLegend(layerName, legends) {
+  for (const lg of legends) if (cadNameMatch(layerName, lg.name)) return lg.name;
+  return null;
+}
 
-// upload + parse a DXF file, return detected layers with lengths and a suggested category each
+// legend library: types of items a drawing can be quantified for (Fire, Plumbing, Roofing, cabling, etc.)
+app.get('/api/cad/legends', auth, wrap(async (req, res) => {
+  res.json(await db.all('SELECT * FROM cad_legends ORDER BY name'));
+}));
+app.post('/api/cad/legends', auth, adminOnly, wrap(async (req, res) => {
+  const { name, measure_type, output_unit, detail, waste_pct, coverage_len_mm, coverage_wid_mm, coverage_gap_mm, thickness_mm } = req.body || {};
+  if (!name || !String(name).trim() || !CAD_MEASURE_TYPES.includes(measure_type)) return res.status(400).json({ error: 'Name and a valid measure type (Length/Area/Count) are required' });
+  try {
+    const info = await db.run(`INSERT INTO cad_legends (name, measure_type, output_unit, detail, waste_pct, coverage_len_mm, coverage_wid_mm, coverage_gap_mm, thickness_mm) VALUES (?,?,?,?,?,?,?,?,?)`,
+      [String(name).trim(), measure_type, (output_unit && String(output_unit).trim()) || (measure_type === 'LENGTH' ? 'm' : measure_type === 'AREA' ? 'm²' : 'Nos'),
+       detail || '', waste_pct !== undefined && waste_pct !== '' ? Number(waste_pct) : 5,
+       coverage_len_mm ? Number(coverage_len_mm) : null, coverage_wid_mm ? Number(coverage_wid_mm) : null,
+       coverage_gap_mm !== undefined && coverage_gap_mm !== '' ? Number(coverage_gap_mm) : null, thickness_mm ? Number(thickness_mm) : null]);
+    res.json({ ok: true, id: info.lastInsertRowid });
+  } catch (e) {
+    if (String(e).includes('UNIQUE')) return res.status(400).json({ error: 'A legend with this name already exists' });
+    throw e;
+  }
+}));
+app.put('/api/cad/legends/:id', auth, adminOnly, wrap(async (req, res) => {
+  const { name, measure_type, output_unit, detail, waste_pct, coverage_len_mm, coverage_wid_mm, coverage_gap_mm, thickness_mm } = req.body || {};
+  if (!name || !String(name).trim() || !CAD_MEASURE_TYPES.includes(measure_type)) return res.status(400).json({ error: 'Name and a valid measure type (Length/Area/Count) are required' });
+  try {
+    await db.run(`UPDATE cad_legends SET name=?, measure_type=?, output_unit=?, detail=?, waste_pct=?, coverage_len_mm=?, coverage_wid_mm=?, coverage_gap_mm=?, thickness_mm=? WHERE id=?`,
+      [String(name).trim(), measure_type, (output_unit && String(output_unit).trim()) || 'Nos', detail || '', waste_pct !== undefined && waste_pct !== '' ? Number(waste_pct) : 5,
+       coverage_len_mm ? Number(coverage_len_mm) : null, coverage_wid_mm ? Number(coverage_wid_mm) : null,
+       coverage_gap_mm !== undefined && coverage_gap_mm !== '' ? Number(coverage_gap_mm) : null, thickness_mm ? Number(thickness_mm) : null, req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    if (String(e).includes('UNIQUE')) return res.status(400).json({ error: 'A legend with this name already exists' });
+    throw e;
+  }
+}));
+app.delete('/api/cad/legends/:id', auth, adminOnly, wrap(async (req, res) => {
+  await db.run('DELETE FROM cad_legends WHERE id = ?', [req.params.id]);
+  res.json({ ok: true });
+}));
+
+// upload + parse a DXF file, return detected layers (length/area/count) with a suggested legend match each.
+// body field "legends" (JSON array of legend names the user tagged for this drawing) narrows auto-matching.
 app.post('/api/cad/parse', auth, upload.single('file'), wrap(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   if (!/\.dxf$/i.test(req.file.originalname || '')) {
@@ -161,30 +218,41 @@ app.post('/api/cad/parse', auth, upload.single('file'), wrap(async (req, res) =>
   }
   const byLayer = {};
   for (const e of (dxf.entities || [])) {
-    if (!['LINE', 'LWPOLYLINE', 'POLYLINE'].includes(e.type)) continue;
     const ly = e.layer || '0';
-    if (!byLayer[ly]) byLayer[ly] = { count: 0, length: 0 };
-    byLayer[ly].count++;
-    byLayer[ly].length += cadEntityLength(e);
+    if (!byLayer[ly]) byLayer[ly] = { count: 0, length: 0, area: 0 };
+    if (['LINE', 'LWPOLYLINE', 'POLYLINE'].includes(e.type)) {
+      byLayer[ly].count++;
+      byLayer[ly].length += cadEntityLength(e);
+      byLayer[ly].area += cadPolygonArea(e);
+    } else if (['INSERT', 'POINT', 'CIRCLE'].includes(e.type)) {
+      byLayer[ly].count++;
+    }
   }
+  const allLegends = await db.all('SELECT * FROM cad_legends ORDER BY name');
+  let requested = [];
+  try { requested = req.body.legends ? JSON.parse(req.body.legends) : []; } catch { requested = []; }
+  const scope = requested.length ? allLegends.filter(lg => requested.includes(lg.name)) : allLegends;
   const saved = await db.all('SELECT layer_name, category FROM cad_layers');
   const savedMap = {}; saved.forEach(r => { savedMap[r.layer_name.toUpperCase()] = r.category; });
-  const layers = Object.keys(byLayer).map(name => ({
-    name, count: byLayer[name].count, length: Number(byLayer[name].length.toFixed(2)),
-    category: savedMap[name.toUpperCase()] || cadGuessCategory(name),
-  })).sort((a, b) => b.length - a.length);
-  if (!layers.length) return res.status(400).json({ error: 'No usable line/polyline geometry found in this drawing (only LINE, LWPOLYLINE and POLYLINE entities are read).' });
-  res.json({ layers });
+  const layers = Object.keys(byLayer).map(name => {
+    const savedLegend = savedMap[name.toUpperCase()];
+    const legend = (savedLegend && scope.some(lg => lg.name === savedLegend)) ? savedLegend : cadGuessLegend(name, scope);
+    return {
+      name, count: byLayer[name].count, length: Number(byLayer[name].length.toFixed(2)), area: Number(byLayer[name].area.toFixed(2)),
+      legend: legend || null,
+    };
+  }).sort((a, b) => b.length - a.length);
+  if (!layers.length) return res.status(400).json({ error: 'No usable geometry found in this drawing.' });
+  res.json({ layers, legends: scope });
 }));
 
-// saved defaults: material dimensions, waste/slack %, remembered layer-name -> category mappings
+// saved defaults (e.g. drawing unit) + remembered layer-name -> legend mappings
 app.get('/api/cad/settings', auth, wrap(async (req, res) => {
   const rows = await db.all('SELECT key, value FROM cad_settings');
   const settings = {}; rows.forEach(r => { try { settings[r.key] = JSON.parse(r.value); } catch { settings[r.key] = r.value; } });
-  const layerMap = await db.all('SELECT layer_name, category FROM cad_layers ORDER BY layer_name');
+  const layerMap = await db.all('SELECT layer_name, category AS legend FROM cad_layers ORDER BY layer_name');
   res.json({ settings, layerMap });
 }));
-
 app.put('/api/cad/settings', auth, wrap(async (req, res) => {
   const { settings, layerMap } = req.body || {};
   if (settings && typeof settings === 'object') {
@@ -194,62 +262,65 @@ app.put('/api/cad/settings', auth, wrap(async (req, res) => {
   }
   if (Array.isArray(layerMap)) {
     for (const l of layerMap) {
-      if (!l.name || !CAD_CATEGORIES.includes(l.category)) continue;
+      if (!l.name || !l.legend) continue;
       await db.run('INSERT INTO cad_layers (layer_name, category) VALUES (?, ?) ON CONFLICT(layer_name) DO UPDATE SET category = excluded.category',
-        [String(l.name).trim(), l.category]);
+        [String(l.name).trim(), String(l.legend).trim()]);
     }
   }
   res.json({ ok: true });
 }));
 
-// given categorized layer lengths + material/wire parameters, compute a suggested quantity takeoff
+// given per-layer legend assignments + raw length/area/count, compute a suggested quantity takeoff per legend
 app.post('/api/cad/calculate', auth, wrap(async (req, res) => {
   const b = req.body || {};
   const factor = CAD_UNIT_FACTORS[b.drawingUnit] || 0.001;
-  let wallLenM = 0, openingLenM = 0, elecLenM = 0, netLenM = 0;
+  const agg = {}; // legend name -> raw {length(m), area(m2), count}
   for (const l of (Array.isArray(b.layers) ? b.layers : [])) {
-    const lenM = (Number(l.length) || 0) * factor;
-    if (l.category === 'WALL') wallLenM += lenM;
-    else if (l.category === 'OPENING') openingLenM += lenM;
-    else if (l.category === 'ELECTRICAL') elecLenM += lenM;
-    else if (l.category === 'NETWORK') netLenM += lenM;
+    if (!l.legend || l.legend === 'IGNORE' || !String(l.legend).trim()) continue;
+    const g = agg[l.legend] || (agg[l.legend] = { length: 0, area: 0, count: 0 });
+    g.length += (Number(l.length) || 0) * factor;
+    g.area += (Number(l.area) || 0) * factor * factor;
+    g.count += Number(l.count) || 0;
   }
-  const wallH = Number(b.wallHeightM) || 3;
-  const openH = Number(b.openingHeightM) || wallH;
-  const grossArea = wallLenM * wallH;
-  const openingArea = Math.min(grossArea, openingLenM * openH);
-  const netArea = Math.max(0, grossArea - openingArea);
-  const waste = 1 + (Number(b.wastePct) || 5) / 100;
+  const legendNames = Object.keys(agg);
+  if (!legendNames.length) return res.json({ items: [] });
+  const legendRows = await db.all(`SELECT * FROM cad_legends WHERE name IN (${legendNames.map(() => '?').join(',')})`, legendNames);
   const items = [];
-  if (wallLenM > 0) {
-    const matLabel = (b.materialLabel && String(b.materialLabel).trim()) || (b.material === 'board' ? 'Boards' : 'Bricks');
-    let qty, unit;
-    if (b.material === 'board') {
-      const bw = Number(b.boardWidthM) || 1.22, bh = Number(b.boardHeightM) || 2.44;
-      qty = Math.ceil((netArea / (bw * bh)) * waste); unit = 'Nos';
-    } else {
-      const bl = (Number(b.brickLengthMm) || 225) + (Number(b.mortarMm) || 10);
-      const bh = (Number(b.brickHeightMm) || 75) + (Number(b.mortarMm) || 10);
-      qty = Math.ceil(((netArea * 1e6) / (bl * bh)) * waste); unit = 'Nos';
+  for (const lg of legendRows) {
+    const raw = agg[lg.name];
+    const wastePct = Number(lg.waste_pct) || 0;
+    const waste = 1 + wastePct / 100;
+    let qty, unit = lg.output_unit, detail;
+    if (lg.measure_type === 'LENGTH') {
+      qty = Number((raw.length * waste).toFixed(2));
+      detail = `${raw.length.toFixed(2)}m raw length, +${wastePct}% waste/slack`;
+    } else if (lg.measure_type === 'AREA') {
+      const areaM2 = raw.area;
+      if (lg.coverage_len_mm && lg.coverage_wid_mm) {
+        const coverM2 = ((Number(lg.coverage_len_mm) + (Number(lg.coverage_gap_mm) || 0)) * (Number(lg.coverage_wid_mm) + (Number(lg.coverage_gap_mm) || 0))) / 1e6;
+        qty = coverM2 > 0 ? Math.ceil((areaM2 / coverM2) * waste) : 0;
+        detail = `${areaM2.toFixed(2)}m² ÷ ${coverM2.toFixed(4)}m² per unit, +${wastePct}% waste`;
+      } else if (lg.thickness_mm) {
+        const volM3 = areaM2 * (Number(lg.thickness_mm) / 1000);
+        qty = Number((volM3 * waste).toFixed(3));
+        detail = `${areaM2.toFixed(2)}m² x ${lg.thickness_mm}mm thickness = ${volM3.toFixed(3)}m³, +${wastePct}% waste`;
+      } else {
+        qty = Number((areaM2 * waste).toFixed(2));
+        detail = `${areaM2.toFixed(2)}m² area, +${wastePct}% waste`;
+      }
+    } else { // COUNT
+      qty = Math.ceil(raw.count * waste);
+      detail = `${raw.count} counted, +${wastePct}% waste`;
     }
-    items.push({ label: 'Wall ' + matLabel, qty, unit,
-      detail: `Wall centerline ${wallLenM.toFixed(2)}m x height ${wallH}m = ${grossArea.toFixed(2)}m² gross, minus ${openingArea.toFixed(2)}m² openings = ${netArea.toFixed(2)}m² net, +${(waste * 100 - 100).toFixed(0)}% waste` });
-  }
-  if (elecLenM > 0) {
-    const pct = Number(b.elecSlackPct) || 10;
-    items.push({ label: 'Electrical Wire', qty: Number((elecLenM * (1 + pct / 100)).toFixed(1)), unit: 'm',
-      detail: `${elecLenM.toFixed(1)}m raw run length +${pct}% slack for drops/joints` });
-  }
-  if (netLenM > 0) {
-    const pct = Number(b.netSlackPct) || 10;
-    items.push({ label: 'Network / Data Cable', qty: Number((netLenM * (1 + pct / 100)).toFixed(1)), unit: 'm',
-      detail: `${netLenM.toFixed(1)}m raw run length +${pct}% slack for drops/joints` });
+    if (qty > 0) {
+      items.push({ label: lg.name, legend: lg.name, qty, unit, detail: detail + (lg.detail ? ' — ' + lg.detail : '') });
+    }
   }
   for (const it of items) {
-    const matches = await similarItems(it.label);
+    const matches = await similarItems(it.legend);
     it.suggested = matches[0] || null;
   }
-  res.json({ wallLenM, openingLenM, grossArea, openingArea, netArea, elecLenM, netLenM, items });
+  res.json({ items });
 }));
 
 // scan the whole list for likely duplicate groups (admin tool)
@@ -342,10 +413,13 @@ async function loadQuant(id) {
 
 app.get('/api/quantifications', auth, wrap(async (req, res) => {
   const dept = req.query.department;
-  const base = 'SELECT q.id, q.title, q.department, q.created_at, q.updated_at, q.created_by, u.name AS creator_name, (SELECT ROUND(SUM(qty*rate),2) FROM quantification_lines l WHERE l.quantification_id = q.id) AS subtotal, q.gst_rate FROM quantifications q JOIN users u ON u.id = q.created_by';
-  const rows = dept && DEPTS_OK(dept)
-    ? await db.all(base + ' WHERE q.department = ? ORDER BY q.updated_at DESC', [dept])
-    : await db.all(base + ' ORDER BY q.updated_at DESC');
+  const source = req.query.source;
+  const base = 'SELECT q.id, q.title, q.department, q.created_at, q.updated_at, q.created_by, q.source, u.name AS creator_name, (SELECT ROUND(SUM(qty*rate),2) FROM quantification_lines l WHERE l.quantification_id = q.id) AS subtotal, q.gst_rate FROM quantifications q JOIN users u ON u.id = q.created_by';
+  const conds = [], args = [];
+  if (dept && DEPTS_OK(dept)) { conds.push('q.department = ?'); args.push(dept); }
+  if (source === 'CAD' || source === 'MANUAL') { conds.push('q.source = ?'); args.push(source); }
+  const where = conds.length ? ' WHERE ' + conds.join(' AND ') : '';
+  const rows = await db.all(base + where + ' ORDER BY q.updated_at DESC', args);
   res.json(rows);
 }));
 
@@ -368,10 +442,10 @@ async function saveLines(qid, lines) {
 }
 
 app.post('/api/quantifications', auth, wrap(async (req, res) => {
-  const { title, department, gst_rate, lines, checked_by, checked_designation, approved_by, approved_designation } = req.body || {};
+  const { title, department, gst_rate, lines, checked_by, checked_designation, approved_by, approved_designation, source } = req.body || {};
   if (!title || !DEPTS_OK(department)) return res.status(400).json({ error: 'Title and valid department required' });
-  const info = await db.run('INSERT INTO quantifications (title, department, gst_rate, checked_by, checked_designation, approved_by, approved_designation, created_by) VALUES (?,?,?,?,?,?,?,?)',
-    [title.trim(), department, gst_rate !== undefined ? Number(gst_rate) : 8, checked_by || '', checked_designation || '', approved_by || '', approved_designation || '', req.user.id]);
+  const info = await db.run('INSERT INTO quantifications (title, department, gst_rate, checked_by, checked_designation, approved_by, approved_designation, created_by, source) VALUES (?,?,?,?,?,?,?,?,?)',
+    [title.trim(), department, gst_rate !== undefined ? Number(gst_rate) : 8, checked_by || '', checked_designation || '', approved_by || '', approved_designation || '', req.user.id, source === 'CAD' ? 'CAD' : 'MANUAL']);
   await saveLines(info.lastInsertRowid, lines);
   res.json({ ok: true, id: info.lastInsertRowid });
 }));
