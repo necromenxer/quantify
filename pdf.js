@@ -96,19 +96,21 @@ function generatePdf(q, stream) {
   doc.fillColor('#000').font('Helvetica-Bold').fontSize(9)
      .text('Prepared By', M + 6, y + 5, { lineBreak: false }).text('Approved by', M + half + 6, y + 5, { lineBreak: false });
   doc.font('Helvetica').fontSize(9);
-  const sig = (x0, name, desig) => {
+  const sig = (x0, name, desig, date) => {
     doc.text('Name: ' + (name || ''), x0, y + 25, { width: half - 12, lineBreak: false })
        .text('Designation: ' + (desig || ''), x0, y + 41, { width: half - 12, lineBreak: false })
        .text('Signature:', x0, y + 60, { lineBreak: false })
-       .text('Date:', x0, y + 88, { lineBreak: false });
+       .text('Date: ' + (date || ''), x0, y + 88, { lineBreak: false });
   };
-  sig(M + 6, q.checked_by, q.checked_designation);
+  // Prepared By date = date of PDF generation (download)
+  const today = new Date().toISOString().slice(0, 10).split('-').reverse().join('.');
+  sig(M + 6, q.checked_by, q.checked_designation, today);
   sig(M + half + 6, q.approved_by, q.approved_designation);
   // digital signature of the preparing user, if uploaded in Settings
   if (q.creator_signature && String(q.creator_signature).startsWith('data:image/png;base64,')) {
     try {
       const buf = Buffer.from(String(q.creator_signature).split(',')[1], 'base64');
-      doc.image(buf, M + 60, y + 54, { fit: [140, 30] });
+      doc.image(buf, M + 58, y + 50, { fit: [180, 38] });
     } catch {}
   }
 
