@@ -262,13 +262,13 @@ async function listView(){
     ${DEPTS.map(d=>`<button class="${curDept===d?'active':''}" onclick="curDept='${d}';listView()">${d}</button>`).join('')}
   </div>
   <div class="card"><h2>Quantifications ${curDept?'— '+esc(curDept):''}</h2>
-  <table><thead><tr><th>Title</th><th>Department</th><th>By</th><th>Updated</th><th style="text-align:right">Grand Total</th><th></th></tr></thead>
+  <table><thead><tr><th>Title</th><th>Department</th><th>By</th><th>Updated</th><th style="text-align:right;padding-right:20px">Grand Total</th><th style="width:180px"></th></tr></thead>
   <tbody>${rows.map(q=>{
     const grand=(q.subtotal||0)*(1+(q.gst_rate||0)/100);
     const mine=q.created_by===me.id||me.role==='ADMIN';
     return `<tr><td><b>${esc(q.title)}</b></td><td>${esc(q.department)}</td><td>${esc(q.creator_name)}</td>
-    <td>${q.updated_at.slice(0,10)}</td><td style="text-align:right">${fmt(grand)}</td>
-    <td class="actions">
+    <td>${q.updated_at.slice(0,10)}</td><td style="text-align:right;padding-right:20px;white-space:nowrap">${fmt(grand)}</td>
+    <td class="actions" style="white-space:nowrap">
       <button class="btn sm" onclick="editorView(${q.id})">${mine?'Edit':'View'}</button>
       <button class="btn sm brand" onclick="dlPdf(${q.id})">PDF</button>
       ${me.role==='ADMIN'?`<button class="btn sm danger" onclick="delQuant(${q.id})">Del</button>`:''}
