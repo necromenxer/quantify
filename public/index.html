@@ -1074,7 +1074,7 @@ async function cadRenderMaterialsPage(){
     </div>
     <p style="font-size:12px;color:var(--gray);margin-bottom:8px">Add materials here directly — no legend needed. A material with ingredients added below is a recipe (e.g. "Plastering" = 1 bag cement + 4 bags fine sand per m²); one with no ingredients is reported as itself (e.g. "Parquet" = so many planks). Dimensions/coverage tell Calculate how to turn a detected length/area/count into a real quantity.</p>
     <div style="overflow-x:auto"><table><thead><tr><th>Material</th><th>Unit</th><th>Master list price</th><th>Dimensions / coverage</th><th>Ingredients</th>${admin?'<th></th>':''}</tr></thead>
-    <tbody>${materials.map(m=>`<tr><td>${esc(m.name)}</td><td style="font-size:12px;color:var(--gray)">${esc(m.unit)}</td><td style="font-size:12px">${cadMaterialPriceCell(m)}</td><td style="font-size:12px;color:var(--gray)">${esc(cadMaterialDimsSummary(m))}</td><td style="font-size:12px;color:var(--gray)">${m.ingredients.map(i=>`${i.qty_per_unit} ${esc(i.item_unit)} ${esc(i.item_name||'?')}${i.itemLinkBroken?' <span style=\"color:#c0392b\">(item removed)</span>':''}`).join(', ')||'none (simple material)'}</td>
+    <tbody>${materials.map(m=>`<tr><td>${esc(m.name)}</td><td style="font-size:12px;color:var(--gray)">${esc(m.unit)}</td><td style="font-size:12px">${cadMaterialPriceCell(m)}</td><td style="font-size:12px;color:var(--gray)">${esc(cadMaterialDimsSummary(m))}</td><td style="font-size:12px;color:var(--gray)">${m.ingredients.map(i=>`${i.qty_per_unit}${i.item_unit?' '+esc(i.item_unit):''} ${esc(i.item_name||'?')}${i.isCustom?' <span class="muted">(custom, not in master list)</span>':''}${i.itemLinkBroken?' <span style=\"color:#c0392b\">(item removed)</span>':''}`).join(', ')||'none (simple material)'}</td>
     ${admin?`<td style="white-space:nowrap"><div class="actions"><button class="btn sm" onclick="cadEditMaterial(${m.id})">Edit</button> <button class="btn sm danger" onclick="cadDelMaterial(${m.id})">Del</button></div></td>`:''}</tr>`).join('')||`<tr><td colspan="${admin?6:5}" style="color:#999">No materials yet${admin?' — press + to add one.':'.'}</td></tr>`}</tbody></table></div>
   </div>`;
   if(admin)cadRenderMaterialModal(materials);
@@ -1082,7 +1082,7 @@ async function cadRenderMaterialsPage(){
 function cadRenderMaterialModal(materials){
   if(!cadMatModalOpen){$('#cadMatModalArea').innerHTML='';return;}
   const editing=cadMatEditId?materials.find(m=>m.id===cadMatEditId):null;
-  if(editing && cadMatPick.length===0 && editing.ingredients.length)cadMatPick=editing.ingredients.map(i=>({item_id:i.item_id,name:i.item_name,unit:i.item_unit,qty_per_unit:i.qty_per_unit,price_override:i.price_override}));
+  if(editing && cadMatPick.length===0 && editing.ingredients.length)cadMatPick=editing.ingredients.map(i=>({item_id:i.item_id,name:i.item_name,unit:i.item_unit,qty_per_unit:i.qty_per_unit,price_override:i.price_override,custom_name:i.custom_name||'',custom_price:i.custom_price??'',_mode:i.item_id?'master':'custom'}));
   const m=editing||{name:'',unit:'Nos',length_mm:'',width_mm:'',height_mm:'',thickness_mm:'',coverage_m2:'',waste_pct:10,price:'',item_id:null};
   const linkedItem=m.item_id?window._cadItems.find(it=>it.id===m.item_id):null;
   $('#cadMatModalArea').innerHTML=`<div class="modal-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto;z-index:50" onclick="closeMaterialModal()">
@@ -1149,20 +1149,33 @@ function cadMaterialFormData(){
 }
 function cadRenderIngredientRows(){
   $('#cadIngList').innerHTML=cadMatPick.map((ing,i)=>{
+    // mode: 'master' = pick from the master items list (live price); 'custom' = plain typed
+    // name+price for anything not on the master list yet. Defaults to whichever the row already has.
+    const mode=ing._mode||(ing.custom_name?'custom':'master');
     const selectedItem=window._cadItems.find(it=>it.id===ing.item_id);
     const priceHint=selectedItem&&(ing.price_override===''||ing.price_override==null)?` (item price: ${selectedItem.price})`:'';
-    return `
-    <div class="row2" style="grid-template-columns:2fr 1fr 1fr auto;align-items:end;margin-bottom:6px">
-      <div><label>Item</label><select onchange="cadMatPick[${i}].item_id=Number(this.value);cadRenderIngredientRows()">
+    const toggle=`<button class="btn sm" style="margin-bottom:6px" onclick="cadMatPick[${i}]._mode='${mode==='master'?'custom':'master'}';cadMatPick[${i}].item_id='';cadMatPick[${i}].custom_name='';cadMatPick[${i}].custom_price='';cadRenderIngredientRows()">${mode==='master'?'Use a custom item instead (not in master list)':'Pick from master list instead'}</button>`;
+    const fields=mode==='master'?`
+      <div><label>Item (from master list)</label><select onchange="cadMatPick[${i}].item_id=Number(this.value);cadRenderIngredientRows()">
         <option value="">— pick —</option>
         ${window._cadItems.map(it=>`<option value="${it.id}" ${ing.item_id===it.id?'selected':''}>${esc(it.name)} (${esc(it.unit)})</option>`).join('')}
       </select></div>
       <div><label>Qty per unit</label><input type="number" step="any" value="${ing.qty_per_unit}" oninput="cadMatPick[${i}].qty_per_unit=this.value"></div>
-      <div><label>Price per unit${priceHint?' — leave blank to use':''}</label><input type="number" step="any" value="${ing.price_override??''}" placeholder="${selectedItem?selectedItem.price:'price'}" oninput="cadMatPick[${i}].price_override=this.value"></div>
-      <button class="btn sm danger" onclick="cadMatPick.splice(${i},1);cadRenderIngredientRows()">×</button>
+      <div><label>Price per unit${priceHint?' — leave blank to use':''}</label><input type="number" step="any" value="${ing.price_override??''}" placeholder="${selectedItem?selectedItem.price:'price'}" oninput="cadMatPick[${i}].price_override=this.value"></div>`
+      :`
+      <div><label>Custom item name <span class="muted" style="font-size:11px">(not in master list)</span></label><input value="${esc(ing.custom_name||'')}" placeholder="e.g. Imported Marble Tile" oninput="cadMatPick[${i}].custom_name=this.value"></div>
+      <div><label>Qty per unit</label><input type="number" step="any" value="${ing.qty_per_unit}" oninput="cadMatPick[${i}].qty_per_unit=this.value"></div>
+      <div><label>Price per unit</label><input type="number" step="any" value="${ing.custom_price??''}" placeholder="price" oninput="cadMatPick[${i}].custom_price=this.value"></div>`;
+    return `
+    <div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--border,#333)">
+      ${toggle}
+      <div class="row2" style="grid-template-columns:2fr 1fr 1fr auto;align-items:end">
+        ${fields}
+        <button class="btn sm danger" onclick="cadMatPick.splice(${i},1);cadRenderIngredientRows()">×</button>
+      </div>
     </div>`;}).join('')||'<p style="font-size:12px;color:var(--gray)">No ingredients yet — add one below.</p>';
 }
-function cadAddIngredientRow(){cadMatPick.push({item_id:'',qty_per_unit:0,note:''});cadRenderIngredientRows();}
+function cadAddIngredientRow(){cadMatPick.push({item_id:'',qty_per_unit:0,note:'',custom_name:'',custom_price:'',_mode:'master'});cadRenderIngredientRows();}
 async function cadAddMaterial(){
   try{await api('/cad/materials',{method:'POST',body:JSON.stringify(cadMaterialFormData())});cadMatPick=[];cadMatModalOpen=false;cadRenderMaterialsPage();}
   catch(e){$('#cadMatErr').textContent=e.message;}
