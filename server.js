@@ -879,14 +879,39 @@ function cadMaterialFields(b) {
   };
 }
 
+// an ingredient row is either linked to a master-list item (item_id set, live price used) or a
+// plain manually-typed entry (custom_name/custom_price) for anything not on the master list yet.
+async function cadSaveIngredients(materialId, ingredients) {
+  for (const ing of (Array.isArray(ingredients) ? ingredients : [])) {
+    const hasItem = !!ing.item_id;
+    const customName = (ing.custom_name || '').trim();
+    if (!hasItem && !customName) continue; // skip empty rows (no item picked and no manual name typed)
+    await db.run('INSERT INTO cad_material_ingredients (material_id, item_id, qty_per_unit, price_override, custom_name, custom_price) VALUES (?,?,?,?,?,?)', [
+      materialId,
+      hasItem ? Number(ing.item_id) : null,
+      Number(ing.qty_per_unit) || 0,
+      ing.price_override !== '' && ing.price_override != null ? Number(ing.price_override) : null,
+      hasItem ? null : customName,
+      (!hasItem && ing.custom_price !== '' && ing.custom_price != null) ? Number(ing.custom_price) : null,
+    ]);
+  }
+}
 app.get('/api/cad/materials', auth, wrap(async (req, res) => {
   const materials = await db.all(`SELECT m.*, i.name AS item_name, i.unit AS item_unit, i.price AS item_price
     FROM cad_materials m LEFT JOIN items i ON i.id = m.item_id AND i.active = 1 ORDER BY m.name`);
   for (const m of materials) {
     // flag when a material is linked to a master item that's been removed/deactivated since linking
     m.itemLinkBroken = !!(m.item_id && !m.item_name);
-    m.ingredients = await db.all('SELECT mi.*, i.name AS item_name, i.unit AS item_unit, i.price AS item_price FROM cad_material_ingredients mi LEFT JOIN items i ON i.id = mi.item_id AND i.active = 1 WHERE mi.material_id = ?', [m.id]);
-    for (const ing of m.ingredients) ing.itemLinkBroken = !!(ing.item_id && !ing.item_name);
+    const rows = await db.all('SELECT mi.*, i.name AS item_name, i.unit AS item_unit, i.price AS item_price FROM cad_material_ingredients mi LEFT JOIN items i ON i.id = mi.item_id AND i.active = 1 WHERE mi.material_id = ?', [m.id]);
+    m.ingredients = rows.map(r => ({
+      ...r,
+      itemLinkBroken: !!(r.item_id && !r.item_name), // was linked, item since removed/deactivated
+      isCustom: !r.item_id, // manually-typed, not on the master list
+      // unify display fields regardless of which mode this row is
+      item_name: r.item_id ? r.item_name : r.custom_name,
+      item_unit: r.item_id ? r.item_unit : null,
+      item_price: r.item_id ? r.item_price : r.custom_price,
+    }));
   }
   res.json(materials);
 }));
@@ -898,11 +923,7 @@ app.post('/api/cad/materials', auth, adminOnly, wrap(async (req, res) => {
     [f.name, f.unit, f.length_mm, f.width_mm, f.height_mm, f.thickness_mm, f.coverage_m2, f.waste_pct, f.price, f.item_id]
   );
   const matId = info.lastInsertRowid;
-  for (const ing of (Array.isArray(req.body.ingredients) ? req.body.ingredients : [])) {
-    if (!ing.item_id) continue;
-    await db.run('INSERT INTO cad_material_ingredients (material_id, item_id, qty_per_unit, price_override) VALUES (?,?,?,?)',
-      [matId, Number(ing.item_id), Number(ing.qty_per_unit) || 0, ing.price_override !== '' && ing.price_override != null ? Number(ing.price_override) : null]);
-  }
+  await cadSaveIngredients(matId, req.body.ingredients);
   res.json({ ok: true, id: matId });
 }));
 app.put('/api/cad/materials/:id', auth, adminOnly, wrap(async (req, res) => {
@@ -913,11 +934,7 @@ app.put('/api/cad/materials/:id', auth, adminOnly, wrap(async (req, res) => {
     [f.name, f.unit, f.length_mm, f.width_mm, f.height_mm, f.thickness_mm, f.coverage_m2, f.waste_pct, f.price, f.item_id, req.params.id]
   );
   await db.run('DELETE FROM cad_material_ingredients WHERE material_id = ?', [req.params.id]);
-  for (const ing of (Array.isArray(req.body.ingredients) ? req.body.ingredients : [])) {
-    if (!ing.item_id) continue;
-    await db.run('INSERT INTO cad_material_ingredients (material_id, item_id, qty_per_unit, price_override) VALUES (?,?,?,?)',
-      [req.params.id, Number(ing.item_id), Number(ing.qty_per_unit) || 0, ing.price_override !== '' && ing.price_override != null ? Number(ing.price_override) : null]);
-  }
+  await cadSaveIngredients(req.params.id, req.body.ingredients);
   res.json({ ok: true });
 }));
 app.delete('/api/cad/materials/:id', auth, adminOnly, wrap(async (req, res) => {
@@ -1082,7 +1099,11 @@ app.post('/api/cad/calculate', auth, wrap(async (req, res) => {
     if (qty <= 0) continue;
 
     const rows = await db.all('SELECT mi.*, i.name AS item_name, i.unit AS item_unit, i.price AS item_price FROM cad_material_ingredients mi LEFT JOIN items i ON i.id = mi.item_id AND i.active = 1 WHERE mi.material_id = ?', [mat.id]);
-    const ingredients = rows.map(r => ({ item: r.item_name, unit: r.item_unit, price: r.price_override != null ? r.price_override : r.item_price, note: r.note, qty: Number((r.qty_per_unit * qty).toFixed(2)) }));
+    const ingredients = rows.map(r => {
+      const name = r.item_id ? r.item_name : r.custom_name;
+      const basePrice = r.item_id ? r.item_price : r.custom_price;
+      return { item: name, unit: r.item_id ? r.item_unit : null, price: r.price_override != null ? r.price_override : basePrice, note: r.note, qty: Number((r.qty_per_unit * qty).toFixed(2)) };
+    });
 
     // prefer the live master-list price when this material is linked to an item; fall back to
     // the material's own stored price if unlinked, or if the linked item was since deleted.

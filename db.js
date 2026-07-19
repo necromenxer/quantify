@@ -120,6 +120,11 @@ CREATE TABLE IF NOT EXISTS cad_symbol_names (
   // can be pulled live instead of typed in and left to go stale. Additive only — materials with
   // no item_id keep working exactly as before, using their own stored price.
   try { await client.execute('ALTER TABLE cad_materials ADD COLUMN item_id INTEGER REFERENCES items(id)'); } catch {}
+  // ingredients: allow a row to either link to a master-list item, OR be a plain manually-typed
+  // name+price for materials/ingredients that simply aren't on the master list yet. item_id stays
+  // nullable for this case; custom_name/custom_price hold the manual entry instead.
+  try { await client.execute('ALTER TABLE cad_material_ingredients ADD COLUMN custom_name TEXT'); } catch {}
+  try { await client.execute('ALTER TABLE cad_material_ingredients ADD COLUMN custom_price REAL'); } catch {}
 
   const itemCount = (await get('SELECT COUNT(*) c FROM items')).c;
   if (Number(itemCount) === 0) {
