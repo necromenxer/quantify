@@ -64,43 +64,50 @@ CREATE TABLE IF NOT EXISTS audit_log (
   details TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-CREATE TABLE IF NOT EXISTS cad_layers (
-  layer_name TEXT PRIMARY KEY,
-  category TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS cad_settings (
-  key TEXT PRIMARY KEY,
-  value TEXT
-);
-CREATE TABLE IF NOT EXISTS cad_legends (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT UNIQUE NOT NULL,
-  measure_type TEXT NOT NULL DEFAULT 'LENGTH',
-  output_unit TEXT NOT NULL DEFAULT 'm',
-  detail TEXT DEFAULT '',
-  waste_pct REAL NOT NULL DEFAULT 5,
-  coverage_len_mm REAL,
-  coverage_wid_mm REAL,
-  coverage_gap_mm REAL,
-  thickness_mm REAL,
-  use_height INTEGER NOT NULL DEFAULT 0,
-  height_m REAL,
-  is_opening INTEGER NOT NULL DEFAULT 0,
-  opening_area_m2 REAL,
-  nets_from TEXT DEFAULT '[]',
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
 CREATE TABLE IF NOT EXISTS cad_materials (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  legend_id INTEGER NOT NULL REFERENCES cad_legends(id) ON DELETE CASCADE,
-  item_id INTEGER REFERENCES items(id),
   name TEXT NOT NULL,
-  coverage_len_mm REAL,
-  coverage_wid_mm REAL,
-  coverage_gap_mm REAL,
+  unit TEXT NOT NULL DEFAULT 'Nos',
+  length_mm REAL,
+  width_mm REAL,
+  height_mm REAL,
   thickness_mm REAL,
+  coverage_m2 REAL,
+  waste_pct REAL NOT NULL DEFAULT 10,
+  price REAL,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS cad_material_ingredients (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  material_id INTEGER NOT NULL REFERENCES cad_materials(id) ON DELETE CASCADE,
+  item_id INTEGER REFERENCES items(id),
+  qty_per_unit REAL NOT NULL DEFAULT 0,
+  note TEXT DEFAULT '',
+  price_override REAL
+);
+CREATE TABLE IF NOT EXISTS cad_symbol_names (
+  signature TEXT PRIMARY KEY,
+  material_id INTEGER REFERENCES cad_materials(id)
 );`;
+  // Clean-slate migration: the app used to have a much simpler CAD Quantify module backed by
+  // cad_legends/cad_materials(legend-linked)/cad_layers/cad_settings. That module has been
+  // replaced entirely by a new engine (room detection, block expansion, ingredient-recipe
+  // materials) with its own schema below. Per explicit instruction, old CAD data is dropped
+  // rather than migrated — none of it is compatible with the new standalone-materials model.
+  for (const old of ['cad_legends', 'cad_layers', 'cad_settings']) {
+    try { await client.execute('DROP TABLE IF EXISTS ' + old); } catch {}
+  }
+  // The old cad_materials table (legend-linked: legend_id NOT NULL, coverage_len_mm/wid_mm/gap_mm,
+  // thickness_mm — no unit/waste/price/ingredients of its own) is a completely different shape
+  // from the new standalone cad_materials table below. Drop it first if it's still the old shape,
+  // so the CREATE TABLE IF NOT EXISTS below actually creates the new shape instead of being a
+  // no-op against the leftover old table.
+  try {
+    const cols = (await client.execute('PRAGMA table_info(cad_materials)')).rows;
+    if (cols.some(c => c.name === 'legend_id')) {
+      await client.execute('DROP TABLE IF EXISTS cad_materials');
+    }
+  } catch {}
   for (const s of stmts.split(';').map(x => x.trim()).filter(Boolean)) await client.execute(s);
   // migration: designation column for users (ignore if it already exists)
   try { await client.execute('ALTER TABLE users ADD COLUMN designation TEXT'); } catch {}
@@ -108,45 +115,7 @@ CREATE TABLE IF NOT EXISTS cad_materials (
   try { await client.execute('ALTER TABLE users ADD COLUMN dob TEXT'); } catch {}
   try { await client.execute('ALTER TABLE users ADD COLUMN signature TEXT'); } catch {}
   try { await client.execute("ALTER TABLE quantifications ADD COLUMN source TEXT NOT NULL DEFAULT 'MANUAL'"); } catch {}
-  try { await client.execute('ALTER TABLE cad_legends ADD COLUMN use_height INTEGER NOT NULL DEFAULT 0'); } catch {}
-  try { await client.execute('ALTER TABLE cad_legends ADD COLUMN height_m REAL'); } catch {}
-  try { await client.execute('ALTER TABLE cad_legends ADD COLUMN is_opening INTEGER NOT NULL DEFAULT 0'); } catch {}
-  try { await client.execute('ALTER TABLE cad_legends ADD COLUMN opening_area_m2 REAL'); } catch {}
-  try { await client.execute("ALTER TABLE cad_legends ADD COLUMN nets_from TEXT DEFAULT '[]'"); } catch {}
-
-  const legendCount = (await get('SELECT COUNT(*) c FROM cad_legends')).c;
-  if (Number(legendCount) === 0) {
-    const seed = [
-      ['FIRE', 'COUNT', 'Nos', '', 5],
-      ['PLUMBING', 'LENGTH', 'm', '', 10],
-      ['ROOFING - WOODEN', 'AREA', 'm²', '', 10],
-      ['ROOFING - STEEL', 'AREA', 'm²', '', 10],
-      ['ROOF INSULATION', 'AREA', 'm²', '', 10],
-      ['FIX CIELING', 'AREA', 'm²', '', 10],
-      ['SUSPENDED CIELING', 'AREA', 'm²', '', 10],
-      ['STEEL FENCING', 'LENGTH', 'm', '', 5],
-      ['WOODEN FENCING', 'LENGTH', 'm', '', 5],
-      ['CONCRETE', 'AREA', 'm²', 'Set a thickness (mm) in this legend to switch the output to m³', 10],
-      ['ELECTRICAL MAIN CABLE', 'LENGTH', 'm', '', 10],
-      ['SUB CABLES - LIGHTS', 'LENGTH', 'm', '', 10],
-      ['SUB CABLES - SOCKETS', 'LENGTH', 'm', '2.5mm wire', 10],
-      ['SUB CABLES', 'LENGTH', 'm', '', 10],
-      ['SOCKETS', 'COUNT', 'Nos', '', 5],
-      ['LIGHTS', 'COUNT', 'Nos', '', 5],
-      ['FANS', 'COUNT', 'Nos', '', 5],
-      ['EXCAVATION', 'AREA', 'm²', 'Set a thickness (mm, i.e. depth) in this legend to switch the output to m³', 10],
-      ['PARQUET FLOORING', 'AREA', 'm²', '', 10],
-      ['TILE FLOORING', 'AREA', 'm²', '', 10],
-      ['WALL TILE', 'AREA', 'm²', '', 10],
-      ['CEMENT SCREEDING', 'AREA', 'm²', '', 10],
-      ['PAINTING', 'AREA', 'm²', '', 10],
-      ['NETWORK CABLE', 'LENGTH', 'm', '', 10],
-    ];
-    for (const [name, measure_type, output_unit, detail, waste_pct] of seed) {
-      await run('INSERT INTO cad_legends (name, measure_type, output_unit, detail, waste_pct) VALUES (?,?,?,?,?)', [name, measure_type, output_unit, detail, waste_pct]);
-    }
-    console.log('Seeded ' + seed.length + ' CAD legends');
-  }
+  try { await client.execute('ALTER TABLE cad_material_ingredients ADD COLUMN price_override REAL'); } catch {}
 
   const itemCount = (await get('SELECT COUNT(*) c FROM items')).c;
   if (Number(itemCount) === 0) {
