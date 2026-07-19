@@ -1151,10 +1151,13 @@ function cadRenderIngredientRows(){
   $('#cadIngList').innerHTML=cadMatPick.map((ing,i)=>{
     // mode: 'master' = pick from the master items list (live price); 'custom' = plain typed
     // name+price for anything not on the master list yet. Defaults to whichever the row already has.
-    const mode=ing._mode||(ing.custom_name?'custom':'master');
+    const mode=ing._mode||(ing.item_id?'master':'custom');
     const selectedItem=window._cadItems.find(it=>it.id===ing.item_id);
     const priceHint=selectedItem&&(ing.price_override===''||ing.price_override==null)?` (item price: ${selectedItem.price})`:'';
-    const toggle=`<button class="btn sm" style="margin-bottom:6px" onclick="cadMatPick[${i}]._mode='${mode==='master'?'custom':'master'}';cadMatPick[${i}].item_id='';cadMatPick[${i}].custom_name='';cadMatPick[${i}].custom_price='';cadRenderIngredientRows()">${mode==='master'?'Use a custom item instead (not in master list)':'Pick from master list instead'}</button>`;
+    const toggle=`<div style="margin-bottom:8px;display:flex;gap:6px">
+      <button type="button" class="btn sm${mode==='custom'?' brand':''}" onclick="cadMatPick[${i}]._mode='custom';cadMatPick[${i}].item_id='';cadRenderIngredientRows()">✎ Type it in manually</button>
+      <button type="button" class="btn sm${mode==='master'?' brand':''}" onclick="cadMatPick[${i}]._mode='master';cadMatPick[${i}].custom_name='';cadMatPick[${i}].custom_price='';cadRenderIngredientRows()">🔗 Link a master list item</button>
+    </div>`;
     const fields=mode==='master'?`
       <div><label>Item (from master list)</label><select onchange="cadMatPick[${i}].item_id=Number(this.value);cadRenderIngredientRows()">
         <option value="">— pick —</option>
@@ -1175,7 +1178,7 @@ function cadRenderIngredientRows(){
       </div>
     </div>`;}).join('')||'<p style="font-size:12px;color:var(--gray)">No ingredients yet — add one below.</p>';
 }
-function cadAddIngredientRow(){cadMatPick.push({item_id:'',qty_per_unit:0,note:'',custom_name:'',custom_price:'',_mode:'master'});cadRenderIngredientRows();}
+function cadAddIngredientRow(){cadMatPick.push({item_id:'',qty_per_unit:0,note:'',custom_name:'',custom_price:'',_mode:'custom'});cadRenderIngredientRows();}
 async function cadAddMaterial(){
   try{await api('/cad/materials',{method:'POST',body:JSON.stringify(cadMaterialFormData())});cadMatPick=[];cadMatModalOpen=false;cadRenderMaterialsPage();}
   catch(e){$('#cadMatErr').textContent=e.message;}
