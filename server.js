@@ -872,13 +872,21 @@ function cadMaterialFields(b) {
     coverage_m2: b.coverage_m2 !== undefined && b.coverage_m2 !== '' ? Number(b.coverage_m2) : null,
     waste_pct: b.waste_pct !== undefined && b.waste_pct !== '' ? Number(b.waste_pct) : 10,
     price: b.price !== undefined && b.price !== '' ? Number(b.price) : null,
+    // optional link to a master-list item, so this material's price is pulled live from the
+    // items table instead of relying on the manually-typed `price` above. Purely additive: a
+    // material with no item_id keeps behaving exactly as before (uses its own stored price).
+    item_id: b.item_id !== undefined && b.item_id !== '' && b.item_id != null ? Number(b.item_id) : null,
   };
 }
 
 app.get('/api/cad/materials', auth, wrap(async (req, res) => {
-  const materials = await db.all('SELECT * FROM cad_materials ORDER BY name');
+  const materials = await db.all(`SELECT m.*, i.name AS item_name, i.unit AS item_unit, i.price AS item_price
+    FROM cad_materials m LEFT JOIN items i ON i.id = m.item_id AND i.active = 1 ORDER BY m.name`);
   for (const m of materials) {
-    m.ingredients = await db.all('SELECT mi.*, i.name AS item_name, i.unit AS item_unit, i.price AS item_price FROM cad_material_ingredients mi LEFT JOIN items i ON i.id = mi.item_id WHERE mi.material_id = ?', [m.id]);
+    // flag when a material is linked to a master item that's been removed/deactivated since linking
+    m.itemLinkBroken = !!(m.item_id && !m.item_name);
+    m.ingredients = await db.all('SELECT mi.*, i.name AS item_name, i.unit AS item_unit, i.price AS item_price FROM cad_material_ingredients mi LEFT JOIN items i ON i.id = mi.item_id AND i.active = 1 WHERE mi.material_id = ?', [m.id]);
+    for (const ing of m.ingredients) ing.itemLinkBroken = !!(ing.item_id && !ing.item_name);
   }
   res.json(materials);
 }));
@@ -886,8 +894,8 @@ app.post('/api/cad/materials', auth, adminOnly, wrap(async (req, res) => {
   const f = cadMaterialFields(req.body);
   if (!f.name) return res.status(400).json({ error: 'Material name required' });
   const info = await db.run(
-    'INSERT INTO cad_materials (name, unit, length_mm, width_mm, height_mm, thickness_mm, coverage_m2, waste_pct, price) VALUES (?,?,?,?,?,?,?,?,?)',
-    [f.name, f.unit, f.length_mm, f.width_mm, f.height_mm, f.thickness_mm, f.coverage_m2, f.waste_pct, f.price]
+    'INSERT INTO cad_materials (name, unit, length_mm, width_mm, height_mm, thickness_mm, coverage_m2, waste_pct, price, item_id) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    [f.name, f.unit, f.length_mm, f.width_mm, f.height_mm, f.thickness_mm, f.coverage_m2, f.waste_pct, f.price, f.item_id]
   );
   const matId = info.lastInsertRowid;
   for (const ing of (Array.isArray(req.body.ingredients) ? req.body.ingredients : [])) {
@@ -901,8 +909,8 @@ app.put('/api/cad/materials/:id', auth, adminOnly, wrap(async (req, res) => {
   const f = cadMaterialFields(req.body);
   if (!f.name) return res.status(400).json({ error: 'Material name required' });
   await db.run(
-    'UPDATE cad_materials SET name=?, unit=?, length_mm=?, width_mm=?, height_mm=?, thickness_mm=?, coverage_m2=?, waste_pct=?, price=? WHERE id=?',
-    [f.name, f.unit, f.length_mm, f.width_mm, f.height_mm, f.thickness_mm, f.coverage_m2, f.waste_pct, f.price, req.params.id]
+    'UPDATE cad_materials SET name=?, unit=?, length_mm=?, width_mm=?, height_mm=?, thickness_mm=?, coverage_m2=?, waste_pct=?, price=?, item_id=? WHERE id=?',
+    [f.name, f.unit, f.length_mm, f.width_mm, f.height_mm, f.thickness_mm, f.coverage_m2, f.waste_pct, f.price, f.item_id, req.params.id]
   );
   await db.run('DELETE FROM cad_material_ingredients WHERE material_id = ?', [req.params.id]);
   for (const ing of (Array.isArray(req.body.ingredients) ? req.body.ingredients : [])) {
@@ -1037,7 +1045,8 @@ app.post('/api/cad/calculate', auth, wrap(async (req, res) => {
   }
   const materialIds = Object.keys(agg).map(Number);
   if (!materialIds.length) return res.json({ groups: [] });
-  const materials = await db.all(`SELECT * FROM cad_materials WHERE id IN (${materialIds.map(() => '?').join(',')})`, materialIds);
+  const materials = await db.all(`SELECT m.*, i.name AS item_name, i.price AS item_price FROM cad_materials m
+    LEFT JOIN items i ON i.id = m.item_id AND i.active = 1 WHERE m.id IN (${materialIds.map(() => '?').join(',')})`, materialIds);
 
   const groups = [];
   for (const mat of materials) {
@@ -1072,10 +1081,13 @@ app.post('/api/cad/calculate', auth, wrap(async (req, res) => {
     }
     if (qty <= 0) continue;
 
-    const rows = await db.all('SELECT mi.*, i.name AS item_name, i.unit AS item_unit, i.price AS item_price FROM cad_material_ingredients mi LEFT JOIN items i ON i.id = mi.item_id WHERE mi.material_id = ?', [mat.id]);
+    const rows = await db.all('SELECT mi.*, i.name AS item_name, i.unit AS item_unit, i.price AS item_price FROM cad_material_ingredients mi LEFT JOIN items i ON i.id = mi.item_id AND i.active = 1 WHERE mi.material_id = ?', [mat.id]);
     const ingredients = rows.map(r => ({ item: r.item_name, unit: r.item_unit, price: r.price_override != null ? r.price_override : r.item_price, note: r.note, qty: Number((r.qty_per_unit * qty).toFixed(2)) }));
 
-    groups.push({ materialId: mat.id, material: mat.name, qty: Number(qty.toFixed(2)), unit, price: mat.price, note, ingredients });
+    // prefer the live master-list price when this material is linked to an item; fall back to
+    // the material's own stored price if unlinked, or if the linked item was since deleted.
+    const price = (mat.item_id && mat.item_price != null) ? mat.item_price : mat.price;
+    groups.push({ materialId: mat.id, material: mat.name, qty: Number(qty.toFixed(2)), unit, price, priceSource: (mat.item_id && mat.item_price != null) ? 'masterList' : (mat.item_id ? 'brokenLink' : 'manual'), note, ingredients });
   }
   res.json({ groups });
 }));
