@@ -1047,6 +1047,11 @@ async function cadMaterialsView(){
   $('#cadSubArea').innerHTML=`<div id="cadMatArea"></div><div id="cadMatModalArea"></div>`;
   cadRenderMaterialsPage();
 }
+function cadMaterialPriceCell(m){
+  if(m.item_id && m.item_name && !m.itemLinkBroken)return `${fmt(m.item_price)} <span class="muted" style="font-size:11px">(linked: ${esc(m.item_name)})</span>`;
+  if(m.item_id && m.itemLinkBroken)return `<span style="color:#c0392b">${m.price!=null?fmt(m.price)+' (fallback)':'—'} — linked item no longer in master list</span>`;
+  return m.price!=null?fmt(m.price):`<span class="muted">not in master list</span>`;
+}
 function cadMaterialDimsSummary(m){
   const parts=[];
   if(m.length_mm&&m.width_mm)parts.push(`${m.length_mm}x${m.width_mm}mm`+(m.height_mm?`x${m.height_mm}mm`:''));
@@ -1068,9 +1073,9 @@ async function cadRenderMaterialsPage(){
       ${admin?`<button class="btn brand fab" style="width:34px;height:34px;border-radius:50%;font-size:18px;line-height:1;padding:0;margin-top:0" title="Add material" onclick="cadOpenAddMaterial()">+</button>`:''}
     </div>
     <p style="font-size:12px;color:var(--gray);margin-bottom:8px">Add materials here directly — no legend needed. A material with ingredients added below is a recipe (e.g. "Plastering" = 1 bag cement + 4 bags fine sand per m²); one with no ingredients is reported as itself (e.g. "Parquet" = so many planks). Dimensions/coverage tell Calculate how to turn a detected length/area/count into a real quantity.</p>
-    <div style="overflow-x:auto"><table><thead><tr><th>Material</th><th>Unit</th><th>Dimensions / coverage</th><th>Ingredients</th>${admin?'<th></th>':''}</tr></thead>
-    <tbody>${materials.map(m=>`<tr><td>${esc(m.name)}</td><td style="font-size:12px;color:var(--gray)">${esc(m.unit)}</td><td style="font-size:12px;color:var(--gray)">${esc(cadMaterialDimsSummary(m))}</td><td style="font-size:12px;color:var(--gray)">${m.ingredients.map(i=>`${i.qty_per_unit} ${esc(i.item_unit)} ${esc(i.item_name)}`).join(', ')||'none (simple material)'}</td>
-    ${admin?`<td style="white-space:nowrap"><div class="actions"><button class="btn sm" onclick="cadEditMaterial(${m.id})">Edit</button> <button class="btn sm danger" onclick="cadDelMaterial(${m.id})">Del</button></div></td>`:''}</tr>`).join('')||`<tr><td colspan="${admin?5:4}" style="color:#999">No materials yet${admin?' — press + to add one.':'.'}</td></tr>`}</tbody></table></div>
+    <div style="overflow-x:auto"><table><thead><tr><th>Material</th><th>Unit</th><th>Master list price</th><th>Dimensions / coverage</th><th>Ingredients</th>${admin?'<th></th>':''}</tr></thead>
+    <tbody>${materials.map(m=>`<tr><td>${esc(m.name)}</td><td style="font-size:12px;color:var(--gray)">${esc(m.unit)}</td><td style="font-size:12px">${cadMaterialPriceCell(m)}</td><td style="font-size:12px;color:var(--gray)">${esc(cadMaterialDimsSummary(m))}</td><td style="font-size:12px;color:var(--gray)">${m.ingredients.map(i=>`${i.qty_per_unit} ${esc(i.item_unit)} ${esc(i.item_name||'?')}${i.itemLinkBroken?' <span style=\"color:#c0392b\">(item removed)</span>':''}`).join(', ')||'none (simple material)'}</td>
+    ${admin?`<td style="white-space:nowrap"><div class="actions"><button class="btn sm" onclick="cadEditMaterial(${m.id})">Edit</button> <button class="btn sm danger" onclick="cadDelMaterial(${m.id})">Del</button></div></td>`:''}</tr>`).join('')||`<tr><td colspan="${admin?6:5}" style="color:#999">No materials yet${admin?' — press + to add one.':'.'}</td></tr>`}</tbody></table></div>
   </div>`;
   if(admin)cadRenderMaterialModal(materials);
 }
@@ -1078,7 +1083,8 @@ function cadRenderMaterialModal(materials){
   if(!cadMatModalOpen){$('#cadMatModalArea').innerHTML='';return;}
   const editing=cadMatEditId?materials.find(m=>m.id===cadMatEditId):null;
   if(editing && cadMatPick.length===0 && editing.ingredients.length)cadMatPick=editing.ingredients.map(i=>({item_id:i.item_id,name:i.item_name,unit:i.item_unit,qty_per_unit:i.qty_per_unit,price_override:i.price_override}));
-  const m=editing||{name:'',unit:'Nos',length_mm:'',width_mm:'',height_mm:'',thickness_mm:'',coverage_m2:'',waste_pct:10,price:''};
+  const m=editing||{name:'',unit:'Nos',length_mm:'',width_mm:'',height_mm:'',thickness_mm:'',coverage_m2:'',waste_pct:10,price:'',item_id:null};
+  const linkedItem=m.item_id?window._cadItems.find(it=>it.id===m.item_id):null;
   $('#cadMatModalArea').innerHTML=`<div class="modal-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto;z-index:50" onclick="closeMaterialModal()">
     <div class="modal card" style="max-width:640px;width:100%;margin:0" onclick="event.stopPropagation()">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><h2 style="margin-bottom:0">${editing?'Edit material':'Add material'}</h2><button class="btn sm" onclick="closeMaterialModal()">✕</button></div>
@@ -1098,7 +1104,14 @@ function cadRenderMaterialModal(materials){
         <div><label>Area coverage (m² per unit)</label><input id="cadMatCov" type="number" step="any" value="${m.coverage_m2??''}" placeholder="e.g. paint, plastering — overrides length x width" oninput="cadSyncDimsFromCoverage()"></div>
         <div><label>Waste %</label><input id="cadMatWaste" type="number" step="any" value="${m.waste_pct??10}"></div>
       </div>
-      <label>Price per unit (optional)</label><input id="cadMatPrice" type="number" step="any" value="${m.price??''}" style="width:160px">
+      <div class="row2" style="margin-top:8px;align-items:end">
+        <div><label>Price per unit (optional)</label><input id="cadMatPrice" type="number" step="any" value="${m.price??''}" style="width:160px"></div>
+        <div><label>Link to master list item (optional)</label><select id="cadMatItemLink" onchange="cadRenderMaterialModalPriceHint()">
+          <option value="">— not linked, use price above —</option>
+          ${window._cadItems.map(it=>`<option value="${it.id}" ${m.item_id===it.id?'selected':''}>${esc(it.name)} (${esc(it.unit)})</option>`).join('')}
+        </select></div>
+      </div>
+      <p id="cadMatItemLinkHint" style="font-size:12px;margin-top:6px">${linkedItem?`Linked — current master list price is <b>${fmt(linkedItem.price)}</b>, and Calculate will always use the live price instead of the field above.`:(m.item_id?'<span style="color:#c0392b">Previously linked item no longer exists in the master list — pick a new one or clear the link.</span>':'')}</p>
       <p style="font-size:12px;color:var(--gray);margin-top:10px">Length x width auto-fills the area coverage for you (and vice versa) — set whichever you actually know. If you set either, Calculate works out how many pieces/units are needed to cover the detected area. Otherwise the detected quantity itself (length, area, or count) is used directly. Ingredients below scale per 1 unit of this material's own computed quantity.</p>
       <div id="cadIngList" style="margin-top:8px"></div>
       <button class="btn sm" onclick="cadAddIngredientRow()">+ Add ingredient</button>
@@ -1120,11 +1133,17 @@ function cadSyncDimsFromCoverage(){
     $('#cadMatLen').value=side;$('#cadMatWid').value=side;
   }
 }
+function cadRenderMaterialModalPriceHint(){
+  const id=$('#cadMatItemLink').value?Number($('#cadMatItemLink').value):null;
+  const item=id?window._cadItems.find(it=>it.id===id):null;
+  $('#cadMatItemLinkHint').innerHTML=item?`Linked — current master list price is <b>${fmt(item.price)}</b>, and Calculate will always use the live price instead of the field above.`:'';
+}
 function cadMaterialFormData(){
   return {
     name:$('#cadMatName').value, unit:$('#cadMatUnit').value,
     length_mm:$('#cadMatLen').value, width_mm:$('#cadMatWid').value, height_mm:$('#cadMatHt').value, thickness_mm:$('#cadMatThick').value,
     coverage_m2:$('#cadMatCov').value, waste_pct:$('#cadMatWaste').value, price:$('#cadMatPrice').value,
+    item_id:$('#cadMatItemLink').value||null,
     ingredients:cadMatPick,
   };
 }
