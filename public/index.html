@@ -545,177 +545,416 @@ async function saveEditItem(id){
 }
 async function delItem(id){if(confirm('Remove this item from the master list?')){await api('/items/'+id,{method:'DELETE'});itemsView();}}
 
-// ---------- CAD Quantify (Drawing Takeoff / Quantified CADs / Takeoff Settings) ----------
+// ---------- CAD Quantify (Drawing Takeoff / Quantified CADs / Materials) ----------
+// Engine/UI ported from the CAD Quantify BETA prototype: block/INSERT expansion, raster room
+// detection from wall lines, a drawing preview (SVG) with room highlights, per-room walls, and
+// standalone ingredient-recipe materials (no legend concept — see server.js/db.js). Every fetch
+// below goes through the shared api() helper (attaches the Bearer token automatically) except
+// the raw multipart file upload, which — same as the old CAD module — attaches the header by
+// hand since api() always sets a JSON Content-Type.
 let cadSubTab='takeoff';
 function cadSubnav(active){
   return `<div class="deptbar">
     <button class="${active==='takeoff'?'active':''}" onclick="cadSubTab='takeoff';cadQuantifyView()">Drawing Takeoff</button>
     <button class="${active==='list'?'active':''}" onclick="cadSubTab='list';cadQuantifyView()">Quantified CADs</button>
-    <button class="${active==='settings'?'active':''}" onclick="cadSubTab='settings';cadQuantifyView()">Takeoff Settings</button>
+    <button class="${active==='materials'?'active':''}" onclick="cadSubTab='materials';cadQuantifyView()">Materials</button>
   </div>`;
 }
 async function cadQuantifyView(){
   main.innerHTML=cadSubnav(cadSubTab)+'<div id="cadSubArea"></div>';
   if(cadSubTab==='list')return cadListView();
-  if(cadSubTab==='settings')return cadSettingsView();
+  if(cadSubTab==='materials')return cadMaterialsView();
   return cadTakeoffView();
 }
 
 // ---- page 1: Drawing Takeoff ----
-let cadLayers=[],cadCalc=null,cadDefaults=null,cadLegendsAll=[],cadSelectedLegends=[],cadLegendDDEl=null,cadDetectedUnit=null,cadMaterialsAll=[];
+// cadParseResult is intentionally a module-level global (not reset on every cadTakeoffView()
+// call) so switching to another tab and back doesn't lose whatever's already been analyzed.
+let cadParseResult=null, cadMaterialsAll=[];
 async function cadTakeoffView(){
-  cadLayers=[];cadCalc=null;cadDetectedUnit=null;cadMaterialsAll=[];
-  const [d,legends]=await Promise.all([api('/cad/settings'),api('/cad/legends')]);
-  cadDefaults=d.settings||{};
-  cadLegendsAll=legends;
+  cadMaterialsAll=await api('/cad/materials');
   $('#cadSubArea').innerHTML=`
   <div class="card">
     <h2>Drawing Takeoff</h2>
-    <p style="font-size:13px;color:var(--gray);margin-bottom:12px">Upload a <b>DXF</b> file (from AutoCAD, Revit, etc — use "Save As" / "Export" and choose DXF; see the note below about DWG). Pick which legends this drawing should be quantified against, then analyze — the app reads the drawing's layers, matches them to your legends, and suggests quantities. Treat results as a calculation aid — always check them against the drawing before finalizing a quantification.</p>
+    <p style="font-size:13px;color:var(--gray);margin-bottom:12px">Upload a <b>DXF</b> file (from AutoCAD, Revit, etc — use "Save As" / "Export" and choose DXF; DWG binary files can't be read directly). The app reads the drawing's own legend/key, room outlines, and wall lines automatically, then suggests quantities. Treat results as a calculation aid — always check them against the drawing before finalizing a quantification.</p>
     <div class="row2">
       <div><label>Project Title</label><input id="cadTitle" placeholder="e.g. Block C Renovation"></div>
       <div><label>Department</label><select id="cadDept">${DEPTS.map(dp=>`<option ${dp===(me.department||DEPTS[3])?'selected':''}>${dp}</option>`).join('')}</select></div>
     </div>
-    <label>Legends to Quantify</label>
-    <div style="position:relative"><input id="cadLegendSearch" placeholder="Search legends — e.g. Sockets, Roofing, Fencing..." autocomplete="off"></div>
-    <div id="cadLegendTags" style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0"></div>
     <label>DXF File</label><input type="file" id="cadFile" accept=".dxf">
     <button class="btn brand" onclick="cadAnalyze()">Analyze Drawing</button>
     <div class="err" id="cadErr"></div>
   </div>
-  <div id="cadLayersArea"></div>
+  <div id="cadItemsArea"></div>
   <div id="cadResultArea"></div>`;
-  renderCadLegendTags();
-  const inp=$('#cadLegendSearch');
-  inp.addEventListener('input',showCadLegendDD);
-  inp.addEventListener('focus',showCadLegendDD);
-  inp.addEventListener('blur',()=>setTimeout(closeCadLegendDD,180));
+  if(cadParseResult)cadRenderItems();
 }
-function renderCadLegendTags(){
-  $('#cadLegendTags').innerHTML=cadSelectedLegends.length?cadSelectedLegends.map(name=>
-    `<span class="tag ADMIN" style="display:inline-flex;align-items:center;gap:6px;padding:4px 10px">${esc(name)}<span style="cursor:pointer;font-weight:700" onclick="cadRemoveLegend('${esc(name).replace(/'/g,"\\'")}')">×</span></span>`
-  ).join(''):'<span style="font-size:12px;color:var(--gray)">No legends selected yet — search above and click one to add it.</span>';
-}
-function cadRemoveLegend(name){cadSelectedLegends=cadSelectedLegends.filter(n=>n!==name);renderCadLegendTags();}
-function showCadLegendDD(){
-  const q=$('#cadLegendSearch').value.trim().toLowerCase();
-  const avail=cadLegendsAll.filter(lg=>!cadSelectedLegends.includes(lg.name)&&(!q||lg.name.toLowerCase().includes(q)));
-  closeCadLegendDD();
-  if(!avail.length)return;
-  const rc=$('#cadLegendSearch').getBoundingClientRect();
-  cadLegendDDEl=document.createElement('div');
-  cadLegendDDEl.className='dd-list';
-  cadLegendDDEl.style.position='fixed';
-  cadLegendDDEl.style.left=rc.left+'px';
-  cadLegendDDEl.style.top=(rc.bottom+2)+'px';
-  cadLegendDDEl.style.width=rc.width+'px';
-  cadLegendDDEl.style.zIndex=50;
-  cadLegendDDEl.innerHTML=avail.map(lg=>`<div data-n="${esc(lg.name)}"><span>${esc(lg.name)}</span><small>${lg.measure_type}</small></div>`).join('');
-  cadLegendDDEl.querySelectorAll('div[data-n]').forEach(el=>el.addEventListener('mousedown',e=>{
-    e.preventDefault();
-    cadSelectedLegends.push(el.dataset.n);
-    $('#cadLegendSearch').value='';
-    renderCadLegendTags();
-    closeCadLegendDD();
-  }));
-  document.body.appendChild(cadLegendDDEl);
-}
-function closeCadLegendDD(){if(cadLegendDDEl){cadLegendDDEl.remove();cadLegendDDEl=null;}}
 async function cadAnalyze(){
   const f=$('#cadFile').files[0];
   $('#cadErr').textContent='';
   if(!f){$('#cadErr').textContent='Choose a .dxf file first.';return;}
-  if(!cadSelectedLegends.length){$('#cadErr').textContent='Select at least one legend to quantify against first.';return;}
-  const fd=new FormData();fd.append('file',f);fd.append('legends',JSON.stringify(cadSelectedLegends));
+  const fd=new FormData();fd.append('file',f);
   try{
     const r=await fetch('/api/cad/parse',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
-    const data=await r.json();
+    const data=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(data.error||'Could not parse file');
-    cadLayers=data.layers.map(l=>({...l,source:f.name}));
-    cadDetectedUnit=data.detectedUnit||null;
+    cadParseResult=data;
+    const validUnits=['mm','cm','m','ft'];
+    cadParseResult.selectedUnit=validUnits.includes(data.detectedUnit)?data.detectedUnit:'mm';
+    cadPreviewViewBox=null; cadPreviewAdjustMode=false;
     cadMaterialsAll=await api('/cad/materials');
     $('#cadResultArea').innerHTML='';
-    renderCadLayers();
+    cadRenderItems();
   }catch(e){$('#cadErr').textContent=e.message;}
 }
-async function cadAnalyzeMore(){
-  const f=$('#cadFileMore')?.files[0];
-  if(!f)return;
-  const fd=new FormData();fd.append('file',f);fd.append('legends',JSON.stringify(cadSelectedLegends));
-  try{
-    const r=await fetch('/api/cad/parse',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
-    const data=await r.json();
-    if(!r.ok)throw new Error(data.error||'Could not parse file');
-    cadLayers=cadLayers.concat(data.layers.map(l=>({...l,source:f.name})));
-    renderCadLayers();
-  }catch(e){alert(e.message);}
+const CAD_DISPLAY_UNIT_FACTORS={mm:0.001,cm:0.01,m:1,ft:0.3048,in:0.0254};
+function cadRoomMaterialSelect(it,i){
+  return `<select onchange="cadParseResult.items[${i}].materialId=this.value?Number(this.value):null">
+    <option value="">— ignore —</option>
+    ${cadMaterialsAll.map(m=>`<option value="${m.id}" ${it.materialId===m.id?'selected':''}>${esc(m.name)}</option>`).join('')}
+  </select>`;
 }
-function renderCadLayers(){
-  const s=cadDefaults||{};
-  const options=['IGNORE',...cadSelectedLegends];
-  const defaultUnit=cadDetectedUnit||s.drawingUnit||'mm';
-  const engaged=[...new Set(cadLayers.filter(l=>l.legend).map(l=>l.legend))];
-  const engagedLegendRows=engaged.map(name=>cadLegendsAll.find(lg=>lg.name===name)).filter(Boolean);
-  $('#cadLayersArea').innerHTML=`<div class="card">
-    <h2>Detected Layers (${cadLayers.length})</h2>
-    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">Assign each layer to one of your selected legends. Layers matching a previously saved default, or whose name closely matches a legend, are pre-filled — check them before calculating.</p>
-    <div style="overflow-x:auto"><table><thead><tr><th>Drawing</th><th>Layer</th><th>Entities</th><th>Length (raw)</th><th>Area (raw)</th><th style="width:200px">Legend</th></tr></thead>
-    <tbody>${cadLayers.map((l,i)=>`<tr><td style="font-size:11px;color:var(--gray)">${esc(l.source||'')}</td><td>${esc(l.name)}</td><td>${l.count}</td><td>${fmt(l.length)}</td><td>${fmt(l.area)}</td>
-      <td><select onchange="cadLayers[${i}].legend=this.value==='IGNORE'?null:this.value;renderCadLayers()">${options.map(o=>`<option value="${esc(o)}" ${(l.legend||'IGNORE')===o?'selected':''}>${esc(o)}</option>`).join('')}</select></td></tr>`).join('')}
-    </tbody></table></div>
-    <div style="margin-top:14px">
-      <label>Add Another Drawing <span style="font-weight:400;text-transform:none;color:var(--gray)">(optional — combine multiple floor plans into one takeoff)</span></label>
-      <div style="display:flex;gap:8px;align-items:center"><input type="file" id="cadFileMore" accept=".dxf" style="flex:1"><button class="btn" onclick="cadAnalyzeMore()">Add</button></div>
+const CAD_ROOM_PALETTE=['#8ec5ff','#c9a6ff','#8fe3c0','#ffe066','#a7f0ba','#9fd8ff'];
+const CAD_TOILET_COLOR='#f2b880';
+function cadRoomFillColor(it,roomColorIdx){
+  return it.roomType==='TOILET'?CAD_TOILET_COLOR:CAD_ROOM_PALETTE[roomColorIdx%CAD_ROOM_PALETTE.length];
+}
+function cadShoelaceAreaJS(verts){
+  let a=0;
+  for(let i=0;i<verts.length;i++){const p=verts[i],q=verts[(i+1)%verts.length];a+=p.x*q.y-q.x*p.y;}
+  return Math.abs(a)/2;
+}
+// Pan/zoom/edit state deliberately lives outside cadRenderItems() (module-level) so it survives
+// the full re-renders that happen on every other edit (picking a material, renaming a room, etc).
+let cadPreviewViewBox=null, cadPreviewAdjustMode=false;
+function cadBuildDrawingPreview(roomEntries){
+  const prev=cadParseResult.preview;
+  if(!prev||!prev.bounds||!prev.geometry||!prev.geometry.length)return '';
+  const b=prev.bounds;
+  const w=b.maxX-b.minX, h=b.maxY-b.minY;
+  if(!(w>0)||!(h>0))return '';
+  const pad=Math.max(w,h)*0.03;
+  const fitVB={x:b.minX-pad, y:-(b.maxY+pad), w:w+pad*2, h:h+pad*2};
+  const vb=cadPreviewViewBox||fitVB;
+  const scaleRef=Math.max(vb.w,vb.h);
+  const sw=scaleRef*0.0015, dotR=scaleRef*0.006, fontSize=scaleRef*0.011, textFontSize=scaleRef*0.01, handleR=scaleRef*0.007;
+  const lineShapes=prev.geometry.filter(g=>g.t==='poly').map(g=>{
+    const pts=g.pts.map(p=>`${p[0]},${-p[1]}`).join(' ');
+    return `<${g.closed?'polygon':'polyline'} points="${pts}" fill="none" stroke="${g.color||'#94a3b8'}" stroke-width="${sw}"/>`;
+  }).join('');
+  const circleShapes=prev.geometry.filter(g=>g.t==='circle').map(g=>`<circle cx="${g.x}" cy="${-g.y}" r="${g.r}" fill="none" stroke="${g.color||'#94a3b8'}" stroke-width="${sw}"/>`).join('');
+  const pointShapes=prev.geometry.filter(g=>g.t==='point').map(g=>`<circle cx="${g.x}" cy="${-g.y}" r="${dotR}" fill="${g.color||'#94a3b8'}"/>`).join('');
+  const textShapes=prev.geometry.filter(g=>g.t==='text').map(g=>`<text x="${g.x}" y="${-g.y}" font-size="${textFontSize}" fill="#64748b">${esc(g.s)}</text>`).join('');
+  let roomColorIdx=0;
+  const roomShapes=roomEntries.map(({it,i})=>{
+    if(!it.vertices||!it.vertices.length)return '';
+    const color=cadRoomFillColor(it,it.roomType==='TOILET'?0:roomColorIdx++);
+    const pts=it.vertices.map(v=>`${v.x},${-v.y}`).join(' ');
+    const cx=it.vertices.reduce((s,v)=>s+v.x,0)/it.vertices.length;
+    const cy=-it.vertices.reduce((s,v)=>s+v.y,0)/it.vertices.length;
+    const handles=cadPreviewAdjustMode?it.vertices.map((v,j)=>`<circle class="room-handle" data-room="${i}" data-vert="${j}" cx="${v.x}" cy="${-v.y}" r="${handleR}" fill="#fff" stroke="${color}" stroke-width="${sw*1.5}" style="cursor:grab"/>`).join(''):'';
+    const labelText=it.autoLabel?`<text id="cad-room-label-${i}" x="${cx}" y="${cy}" font-size="${fontSize}" fill="#111827" text-anchor="middle" style="font-weight:700;paint-order:stroke;stroke:#fff;stroke-width:${fontSize*0.15}">${esc(it.detectedLabel)}</text>`:`<text id="cad-room-label-${i}" x="${cx}" y="${cy}" font-size="0" opacity="0"></text>`;
+    const clickAttrs=cadPreviewAdjustMode?` class="cad-room-poly" data-room="${i}" style="cursor:copy"`:'';
+    return `<polygon id="cad-room-poly-${i}" points="${pts}" fill="${color}" fill-opacity="0.55" stroke="${color}" stroke-width="${sw*1.5}"${clickAttrs}/>
+      ${labelText}
+      ${handles}`;
+  }).join('');
+  return `<div class="card">
+    <h2>Drawing preview</h2>
+    <p style="font-size:13px;color:var(--gray);margin-bottom:8px">Detected floor areas are highlighted directly on the drawing — toilets in peach, other rooms in blue/purple/green shades — so you can visually confirm they match before assigning materials. Scroll/pinch to zoom, drag to pan.${cadPreviewAdjustMode?' Drag the white handles to reshape a highlighted area, or click anywhere along its outline to add a new corner there.':''}</p>
+    <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+      <button class="btn sm" onclick="cadPreviewZoomBtn(0.8)">Zoom in</button>
+      <button class="btn sm" onclick="cadPreviewZoomBtn(1.25)">Zoom out</button>
+      <button class="btn sm" onclick="cadPreviewResetView()">Reset view</button>
+      ${roomEntries.length?`<button class="btn sm ${cadPreviewAdjustMode?'brand':''}" onclick="cadPreviewToggleAdjust()">${cadPreviewAdjustMode?'Done adjusting':'Adjust floor areas'}</button>`:''}
+      <button class="btn sm" onclick="cadAddManualArea()">+ Add area</button>
     </div>
-    <h2 style="margin-top:20px">Drawing Unit</h2>
-    <div class="row2">
-      <div><label>Drawing Unit</label><select id="cadUnit"><option value="mm" ${defaultUnit==='mm'?'selected':''}>Millimeters (mm)</option><option value="cm" ${defaultUnit==='cm'?'selected':''}>Centimeters (cm)</option><option value="m" ${defaultUnit==='m'?'selected':''}>Meters (m)</option><option value="ft" ${defaultUnit==='ft'?'selected':''}>Feet (ft)</option><option value="in" ${defaultUnit==='in'?'selected':''}>Inches (in)</option></select>
-      ${cadDetectedUnit?`<p style="font-size:12px;color:var(--ok);margin-top:4px">Detected from the file itself and pre-selected below — double-check it still looks right.</p>`:`<p style="font-size:12px;color:var(--gray);margin-top:4px">Couldn't read a unit from the file — pre-filled from your last-used setting, please confirm it.</p>`}
+    <div id="cadPreviewContainer" style="background:#0b1220;border-radius:8px;overflow:hidden;height:600px;position:relative">
+      <svg id="cadPreviewSvg" viewBox="${vb.x} ${vb.y} ${vb.w} ${vb.h}" style="width:100%;height:100%;display:block;touch-action:none;cursor:grab">
+        ${lineShapes}${circleShapes}${pointShapes}${textShapes}${roomShapes}
+      </svg>
+    </div>
+  </div>`;
+}
+function cadPreviewSvgPoint(svg,evt){
+  const pt=svg.createSVGPoint();
+  pt.x=evt.clientX; pt.y=evt.clientY;
+  const ctm=svg.getScreenCTM();
+  if(!ctm)return {x:0,y:0};
+  const p=pt.matrixTransform(ctm.inverse());
+  return {x:p.x,y:p.y};
+}
+function cadPreviewGetVB(svg){
+  const [x,y,w,h]=svg.getAttribute('viewBox').split(' ').map(Number);
+  return {x,y,w,h};
+}
+function cadPreviewSetVB(svg,vb){
+  svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  cadPreviewViewBox=vb;
+}
+function cadPreviewZoomBtn(factor){
+  const svg=$('#cadPreviewSvg');
+  if(!svg)return;
+  const vb=cadPreviewGetVB(svg);
+  const cx=vb.x+vb.w/2, cy=vb.y+vb.h/2;
+  const w=vb.w*factor, h=vb.h*factor;
+  cadPreviewSetVB(svg,{x:cx-w/2,y:cy-h/2,w,h});
+}
+function cadPreviewResetView(){ cadPreviewViewBox=null; cadRenderItems(); }
+function cadPreviewToggleAdjust(){ cadPreviewAdjustMode=!cadPreviewAdjustMode; cadRenderItems(); }
+function cadClosestPointOnPolyBoundary(pt,verts){
+  let best=null;
+  for(let i=0;i<verts.length;i++){
+    const a=verts[i], b=verts[(i+1)%verts.length];
+    const abx=b.x-a.x, aby=b.y-a.y;
+    const len2=abx*abx+aby*aby;
+    let t=len2>0?((pt.x-a.x)*abx+(pt.y-a.y)*aby)/len2:0;
+    t=Math.max(0,Math.min(1,t));
+    const px=a.x+abx*t, py=a.y+aby*t;
+    const dist=Math.hypot(pt.x-px,pt.y-py);
+    if(!best||dist<best.dist)best={dist,edgeIdx:i,point:{x:px,y:py}};
+  }
+  return best;
+}
+function cadHandleRoomBoundaryClick(evt,roomIdx){
+  const svg=$('#cadPreviewSvg');
+  if(!svg)return;
+  const p=cadPreviewSvgPoint(svg,evt);
+  const dxfPt={x:p.x,y:-p.y};
+  const verts=cadParseResult.items[roomIdx].vertices;
+  const vb=cadPreviewGetVB(svg);
+  const tolerance=Math.max(vb.w,vb.h)*0.05;
+  const closest=cadClosestPointOnPolyBoundary(dxfPt,verts);
+  if(!closest||closest.dist>tolerance)return;
+  verts.splice(closest.edgeIdx+1,0,closest.point);
+  cadParseResult.items[roomIdx].area=cadShoelaceAreaJS(verts);
+  cadParseResult.items[roomIdx].grossArea=null; cadParseResult.items[roomIdx].netArea=null;
+  cadRenderItems();
+}
+function cadDeleteRoomItem(i){
+  if(!confirm('Remove this floor area?'))return;
+  cadParseResult.items.splice(i,1);
+  cadRenderItems();
+}
+function cadAddManualArea(){
+  const svg=$('#cadPreviewSvg');
+  let cx,cy,size;
+  if(svg){
+    const vb=cadPreviewGetVB(svg);
+    cx=vb.x+vb.w/2; cy=vb.y+vb.h/2; size=Math.min(vb.w,vb.h)*0.2;
+  } else if(cadParseResult.preview&&cadParseResult.preview.bounds){
+    const b=cadParseResult.preview.bounds;
+    cx=(b.minX+b.maxX)/2; cy=-(b.minY+b.maxY)/2; size=Math.min(b.maxX-b.minX,b.maxY-b.minY)*0.2;
+  } else { cx=0;cy=0;size=1000; }
+  const half=Math.max(size,1)/2, dxfCx=cx, dxfCy=-cy;
+  const verts=[{x:dxfCx-half,y:dxfCy-half},{x:dxfCx+half,y:dxfCy-half},{x:dxfCx+half,y:dxfCy+half},{x:dxfCx-half,y:dxfCy+half}];
+  const n=cadParseResult.items.filter(it=>it.kind==='ROOM').length+1;
+  const label='New Area '+n;
+  cadParseResult.items.push({
+    kind:'ROOM', roomType:'ROOM', signature:'ROOM:MANUAL:'+Date.now()+':'+n, type:'ROOM', layer:'manual', blockName:null,
+    description:'Room — "'+label+'"', colorName:null, colorHex:null,
+    detectedLabel:label, autoLabel:true, count:0, length:0,
+    area:cadShoelaceAreaJS(verts), grossArea:null, netArea:null,
+    vertices:verts, materialId:null,
+  });
+  cadPreviewAdjustMode=true;
+  cadRenderItems();
+}
+function cadSetupPreviewInteractions(){
+  const svg=$('#cadPreviewSvg');
+  if(!svg)return;
+  svg.addEventListener('wheel',e=>{
+    e.preventDefault();
+    const vb=cadPreviewGetVB(svg);
+    const p=cadPreviewSvgPoint(svg,e);
+    const scale=e.deltaY<0?0.88:1.12;
+    const w=Math.max(vb.w*scale,1e-6), h=Math.max(vb.h*scale,1e-6);
+    cadPreviewSetVB(svg,{x:p.x-(p.x-vb.x)*scale, y:p.y-(p.y-vb.y)*scale, w, h});
+  },{passive:false});
+  let panning=false, lastX=0, lastY=0, downX=0, downY=0, downTarget=null;
+  const CLICK_SLOP=4;
+  svg.addEventListener('pointerdown',e=>{
+    if(e.target.classList && e.target.classList.contains('room-handle'))return;
+    panning=true; lastX=e.clientX; lastY=e.clientY; downX=e.clientX; downY=e.clientY; downTarget=e.target;
+    svg.setPointerCapture(e.pointerId);
+    svg.style.cursor='grabbing';
+  });
+  svg.addEventListener('pointermove',e=>{
+    if(!panning)return;
+    const vb=cadPreviewGetVB(svg);
+    const rect=svg.getBoundingClientRect();
+    const sx=vb.w/rect.width, sy=vb.h/rect.height;
+    cadPreviewSetVB(svg,{x:vb.x-(e.clientX-lastX)*sx, y:vb.y-(e.clientY-lastY)*sy, w:vb.w, h:vb.h});
+    lastX=e.clientX; lastY=e.clientY;
+  });
+  const endPan=e=>{
+    panning=false; svg.style.cursor='grab';
+    if(e && downTarget && downTarget.classList && downTarget.classList.contains('cad-room-poly')){
+      const moved=Math.hypot(e.clientX-downX,e.clientY-downY);
+      if(moved<CLICK_SLOP)cadHandleRoomBoundaryClick(e,Number(downTarget.dataset.room));
+    }
+    downTarget=null;
+  };
+  svg.addEventListener('pointerup',endPan);
+  svg.addEventListener('pointerleave',()=>{panning=false; svg.style.cursor='grab'; downTarget=null;});
+  svg.querySelectorAll('.room-handle').forEach(handle=>{
+    handle.addEventListener('pointerdown',e=>{
+      e.stopPropagation();
+      const roomIdx=Number(handle.dataset.room), vertIdx=Number(handle.dataset.vert);
+      handle.setPointerCapture(e.pointerId);
+      const move=ev=>{
+        const p=cadPreviewSvgPoint(svg,ev);
+        cadParseResult.items[roomIdx].vertices[vertIdx]={x:p.x,y:-p.y};
+        const verts=cadParseResult.items[roomIdx].vertices;
+        const poly=document.getElementById('cad-room-poly-'+roomIdx);
+        if(poly)poly.setAttribute('points',verts.map(v=>`${v.x},${-v.y}`).join(' '));
+        handle.setAttribute('cx',p.x); handle.setAttribute('cy',p.y);
+        const label=document.getElementById('cad-room-label-'+roomIdx);
+        if(label){
+          label.setAttribute('x',verts.reduce((s,v)=>s+v.x,0)/verts.length);
+          label.setAttribute('y',-verts.reduce((s,v)=>s+v.y,0)/verts.length);
+        }
+      };
+      const up=()=>{
+        handle.removeEventListener('pointermove',move);
+        handle.removeEventListener('pointerup',up);
+        const verts=cadParseResult.items[roomIdx].vertices;
+        cadParseResult.items[roomIdx].area=cadShoelaceAreaJS(verts);
+        cadParseResult.items[roomIdx].grossArea=null;
+        cadParseResult.items[roomIdx].netArea=null;
+        cadRenderItems();
+      };
+      handle.addEventListener('pointermove',move);
+      handle.addEventListener('pointerup',up);
+    });
+  });
+}
+function cadRenderItems(){
+  const items=cadParseResult.items;
+  const symbolItems=items.map((it,i)=>({it,i})).filter(x=>x.it.kind!=='ROOM'&&x.it.kind!=='WALL');
+  const roomEntries=items.map((it,i)=>({it,i})).filter(x=>x.it.kind==='ROOM');
+  const wallEntries=items.map((it,i)=>({it,i})).filter(x=>x.it.kind==='WALL');
+  const layers=[...new Set(symbolItems.map(x=>x.it.layer))].sort();
+  const unit=cadParseResult.selectedUnit||cadParseResult.detectedUnit||'mm';
+  const uf=CAD_DISPLAY_UNIT_FACTORS[unit]||0.001;
+  const roomArea=roomEntries.filter(x=>x.it.roomType==='ROOM').reduce((s,x)=>s+x.it.area,0)*uf*uf;
+  const toiletArea=roomEntries.filter(x=>x.it.roomType==='TOILET').reduce((s,x)=>s+x.it.area,0)*uf*uf;
+  wallEntries.forEach(({it})=>{ it.area=it.netWallLength*((it.heightM||0)/uf); });
+  const previewHtml=cadBuildDrawingPreview(roomEntries);
+
+  let roomColorIdx2=0;
+  const roomsHtml=roomEntries.length?`<div class="card">
+    <h2>Rooms &amp; floor areas (${roomEntries.length})</h2>
+    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">Closed room outlines were detected automatically, so flooring can be assigned per room instead of one blanket total. Area shown is the net internal floor area where it could be detected, otherwise the outline's own area. Name, type, and area are all editable — fix anything the auto-detection got wrong before calculating.</p>
+    <div class="row2" style="margin-bottom:10px">
+      <div style="background:rgba(0,0,0,0.03);border-radius:6px;padding:10px">
+        <div style="font-size:12px;color:var(--gray)">Total internal floor area (estimate)</div>
+        <div style="font-size:18px;font-weight:700">${fmt(roomArea+toiletArea)} m²</div>
+      </div>
+      <div style="background:rgba(0,0,0,0.03);border-radius:6px;padding:10px">
+        <div style="font-size:12px;color:var(--gray)">Rooms ${fmt(roomArea)} m² &nbsp;·&nbsp; Toilets ${fmt(toiletArea)} m²</div>
+        <div style="font-size:12px;color:var(--gray)">Estimated from the detected unit (${unit}) — exact figures come from Calculate.</div>
       </div>
     </div>
-    ${engagedLegendRows.length?`<h2 style="margin-top:20px">Height & Materials</h2>
-    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">For wall/fence-type legends measured as a vertical run, set the height used to work out the face area they cover. Where you've set up specific materials for a legend under Takeoff Settings, pick which one this drawing uses — its exact spec and price come along automatically.</p>
-    ${engagedLegendRows.map((lg,i)=>{
-      const mats=(cadMaterialsAll||[]).filter(m=>m.legend_id===lg.id);
-      if(!lg.use_height&&!mats.length)return '';
-      return `<div class="row2" style="margin-bottom:8px">
-        ${lg.use_height?`<div><label>${esc(lg.name)} — Height (m)</label><input id="cadHeight_${i}" data-legend="${esc(lg.name)}" type="number" step="any" value="${lg.height_m??3}"></div>`:'<div></div>'}
-        ${mats.length?`<div><label>${esc(lg.name)} — Material</label><select id="cadMat_${i}" data-legend="${esc(lg.name)}"><option value="">Use legend default</option>${mats.map(m=>`<option value="${m.id}">${esc(m.name)}${m.item_name?' — '+esc(m.item_name):''}</option>`).join('')}</select></div>`:'<div></div>'}
-      </div>`;
-    }).join('')}`:''}
-    <label style="display:flex;align-items:center;gap:6px;margin-top:14px;text-transform:none;font-weight:400"><input type="checkbox" id="cadRemember" style="width:auto" checked> Remember these layer-legend assignments as defaults for next time</label>
+    <div style="overflow-x:auto"><table><thead><tr><th style="width:26px"></th><th style="width:180px">Room</th><th style="width:100px">Type</th><th style="width:140px">Floor area (m²)</th><th style="width:190px">Material</th><th style="width:50px"></th></tr></thead>
+    <tbody>${roomEntries.map(({it,i})=>{
+      const areaM2=Number((it.area*uf*uf).toFixed(3));
+      const grossM2=it.grossArea!=null?Number((it.grossArea*uf*uf).toFixed(2)):null;
+      const hint=(grossM2!=null && Math.abs(grossM2-areaM2)>0.01)?`<div style="font-size:11px;color:var(--gray)">gross incl. walls: ${fmt(grossM2)} m²</div>`:'';
+      const swatch=cadRoomFillColor(it,it.roomType==='TOILET'?0:roomColorIdx2++);
+      return `<tr>
+      <td><span style="display:inline-block;width:14px;height:14px;border-radius:3px;background:${swatch}"></span></td>
+      <td><input type="text" value="${esc(it.detectedLabel)}" style="width:100%" oninput="cadParseResult.items[${i}].detectedLabel=this.value;cadParseResult.items[${i}].description=(cadParseResult.items[${i}].roomType==='TOILET'?'Toilet':'Room')+' — \\''+this.value+'\\''"></td>
+      <td><select onchange="cadParseResult.items[${i}].roomType=this.value;cadParseResult.items[${i}].description=(this.value==='TOILET'?'Toilet':'Room')+' — \\''+cadParseResult.items[${i}].detectedLabel+'\\'';cadRenderItems()">
+        <option value="ROOM" ${it.roomType==='ROOM'?'selected':''}>Room</option>
+        <option value="TOILET" ${it.roomType==='TOILET'?'selected':''}>Toilet</option>
+      </select></td>
+      <td><input type="number" step="any" value="${areaM2}" style="width:100%" oninput="cadParseResult.items[${i}].area=Number(this.value)/(${uf}*${uf})">${hint}</td>
+      <td>${cadRoomMaterialSelect(it,i)}</td>
+      <td><button class="btn sm danger" onclick="cadDeleteRoomItem(${i})" title="Remove">×</button></td>
+    </tr>`;}).join('')}</tbody></table></div>
+  </div>`:'';
+
+  const wallsHtml=wallEntries.length?`<div class="card">
+    <h2>Walls (${wallEntries.length})</h2>
+    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">One wall run per detected room — length is the perimeter with door/window-style openings already excluded. Set a height per room (no ceiling height is stored in the drawing) to get the paintable/tileable/plasterable wall area; pick a material separately from the room's own floor material.</p>
+    <div style="overflow-x:auto"><table><thead><tr><th style="width:180px">Room</th><th style="width:230px">Wall length</th><th style="width:110px">Height (m)</th><th style="width:130px">Wall area (m²)</th><th style="width:190px">Material</th></tr></thead>
+    <tbody>${wallEntries.map(({it,i})=>{
+      const perimM=(it.perimeter*uf).toFixed(2), openM=(it.openingsLength*uf).toFixed(2), netM=(it.netWallLength*uf).toFixed(2);
+      const areaM2=(it.netWallLength*uf*(it.heightM||0)).toFixed(3);
+      return `<tr>
+      <td>${esc(it.detectedLabel)}</td>
+      <td style="font-size:12px;color:var(--gray)">${netM}m net <span style="font-size:11px">(${perimM}m perimeter − ${openM}m openings)</span></td>
+      <td><input type="number" step="any" value="${it.heightM}" style="width:100%" oninput="cadParseResult.items[${i}].heightM=Number(this.value);cadParseResult.items[${i}].area=cadParseResult.items[${i}].netWallLength*((Number(this.value)||0)/${uf});document.getElementById('wall-area-${i}').textContent=fmt((cadParseResult.items[${i}].netWallLength*${uf}*(Number(this.value)||0)).toFixed(3))"></td>
+      <td id="wall-area-${i}">${fmt(areaM2)}</td>
+      <td>${cadRoomMaterialSelect(it,i)}</td>
+    </tr>`;}).join('')}</tbody></table></div>
+  </div>`:'';
+
+  $('#cadItemsArea').innerHTML=`${previewHtml}${roomsHtml}${wallsHtml}<div class="card">
+    <h2>Detected items (${symbolItems.length}) across ${layers.length} layer${layers.length===1?'':'s'}</h2>
+    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">${cadParseResult.legendKeyCount} symbol/label pairs were read from the drawing's own legend. ${symbolItems.filter(x=>x.it.detectedLabel).length} of ${symbolItems.length} detected item types were matched to a label (${symbolItems.filter(x=>x.it.labelSource==='legend').length} from the legend, ${symbolItems.filter(x=>x.it.labelSource==='block').length} from the block's own name). Grouped by layer below — pick a material for anything not auto-matched. Unit detected from file: <b>${cadParseResult.detectedUnit||'not found, defaulting to mm'}</b>.</p>
+    <div style="overflow-x:auto"><table><thead><tr><th>Detected as</th><th>Color</th><th>From drawing</th><th>Count</th><th>Length</th><th>Area</th><th style="width:220px">Material</th></tr></thead>
+    <tbody>${layers.map(layer=>{
+      const rows=symbolItems.filter(x=>x.it.layer===layer);
+      return `<tr style="background:rgba(181,200,39,0.08)"><td colspan="7"><b>Layer: ${esc(layer)}</b> <span style="font-size:12px;color:var(--gray)">— ${rows.length} color-coded component${rows.length===1?'':'s'}</span></td></tr>`
+        + rows.map(({it,i})=>`<tr>
+          <td style="padding-left:22px">${it.detectedLabel?esc(it.detectedLabel)+(it.labelSource==='block'?' <span style="font-size:11px;color:var(--gray)">(from block name)</span>':''):'<span style="color:var(--gray)">no label match</span>'}</td>
+          <td>${it.colorHex?`<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${it.colorHex};border:1px solid #64748b;vertical-align:middle;margin-right:5px"></span><span style="font-size:12px;color:var(--gray)">${esc(it.colorName)}</span>`:'<span style="color:var(--gray)">—</span>'}</td>
+          <td style="font-size:12px;color:var(--gray)">${esc(it.description)}</td>
+          <td>${it.count}</td><td>${fmt(it.length)}</td><td>${fmt(it.area)}</td>
+          <td><select onchange="cadParseResult.items[${i}].materialId=this.value?Number(this.value):null">
+            <option value="">— ignore —</option>
+            ${cadMaterialsAll.map(m=>`<option value="${m.id}" ${it.materialId===m.id?'selected':''}>${esc(m.name)}</option>`).join('')}
+          </select></td>
+        </tr>`).join('');
+    }).join('')}</tbody></table></div>
+    <h2 style="margin-top:16px">Drawing unit</h2>
+    <select id="cadUnitSel" onchange="cadParseResult.selectedUnit=this.value;cadRenderItems()">
+      <option value="mm" ${unit==='mm'?'selected':''}>Millimeters (mm)</option>
+      <option value="cm" ${unit==='cm'?'selected':''}>Centimeters (cm)</option>
+      <option value="m" ${unit==='m'?'selected':''}>Meters (m)</option>
+      <option value="ft" ${unit==='ft'?'selected':''}>Feet (ft)</option>
+    </select>
     <button class="btn brand" onclick="cadCalculate()">Calculate</button>
     <div class="err" id="cadCalcErr"></div>
   </div>`;
+  cadSetupPreviewInteractions();
 }
+let cadCalc=null;
 async function cadCalculate(){
-  const legendHeights={},legendMaterials={};
-  document.querySelectorAll('[id^="cadHeight_"]').forEach(inp=>{legendHeights[inp.dataset.legend]=inp.value;});
-  document.querySelectorAll('[id^="cadMat_"]').forEach(sel=>{if(sel.value)legendMaterials[sel.dataset.legend]=sel.value;});
-  const body={
-    layers:cadLayers.map(l=>({name:l.name,legend:l.legend,length:l.length,area:l.area,count:l.count})),
-    drawingUnit:$('#cadUnit').value,
-    legendHeights, legendMaterials,
-  };
+  const body={items:cadParseResult.items,drawingUnit:$('#cadUnitSel').value,heights:{}};
   try{
     cadCalc=await api('/cad/calculate',{method:'POST',body:JSON.stringify(body)});
-    renderCadResult();
-    if($('#cadRemember').checked){
-      api('/cad/settings',{method:'PUT',body:JSON.stringify({settings:{drawingUnit:body.drawingUnit},layerMap:cadLayers.filter(l=>l.legend).map(l=>({name:l.name,legend:l.legend}))})}).catch(()=>{});
-    }
+    cadRenderResult();
+    const map={};cadParseResult.items.forEach(it=>{if(it.materialId)map[it.signature]={materialId:it.materialId};});
+    api('/cad/symbol-names',{method:'PUT',body:JSON.stringify({map})}).catch(()=>{});
   }catch(e){$('#cadCalcErr').textContent=e.message;}
 }
-function renderCadResult(){
-  const items=cadCalc.items;
-  if(!items.length){$('#cadResultArea').innerHTML='<div class="card"><p style="color:var(--gray)">No layers were assigned to a legend, so there is nothing to calculate. Adjust the layer legends above and recalculate.</p></div>';return;}
+// Flattens Calculate's per-material groups (each either a single self-row, or one row per
+// ingredient) into one checkbox-able takeoff table, matching the rest of the app's existing
+// "review checked lines, then add/save/export" flow.
+function cadFlattenCalcRows(){
+  const rows=[];
+  (cadCalc.groups||[]).forEach(g=>{
+    const gRows=g.ingredients.length
+      ? g.ingredients.map(i=>({description:i.item||'—',unit:i.unit||'',qty:i.qty,rate:i.price!=null?i.price:'',detail:`${g.material}: ${g.note}`+(i.note?' — '+i.note:'')}))
+      : [{description:g.material,unit:g.unit,qty:g.qty,rate:g.price!=null?g.price:'',detail:g.note}];
+    rows.push(...gRows);
+  });
+  return rows;
+}
+function cadRenderResult(){
+  const rows=cadFlattenCalcRows();
+  if(!rows.length){$('#cadResultArea').innerHTML='<div class="card"><p style="color:var(--gray)">Nothing to calculate — assign at least one detected item/room/wall to a material.</p></div>';return;}
   $('#cadResultArea').innerHTML=`<div class="card">
     <h2>Suggested Takeoff</h2>
     <table><thead><tr><th style="width:26px"></th><th>Item</th><th style="width:110px">Quantity</th><th style="width:70px">Unit</th><th>Basis</th></tr></thead>
-    <tbody>${items.map((it,i)=>`<tr>
+    <tbody>${rows.map((it,i)=>`<tr>
       <td><input type="checkbox" id="cadChk${i}" checked style="width:auto"></td>
-      <td>${esc(it.suggested?it.suggested.name:it.label)}${it.suggested?' <span class="tag USER" style="font-size:10px">matched to master list</span>':''}</td>
+      <td>${esc(it.description)}</td>
       <td><input id="cadQty${i}" type="number" step="any" value="${it.qty}"></td>
-      <td>${esc(it.suggested?it.suggested.unit:it.unit)}</td>
+      <td>${esc(it.unit)}</td>
       <td style="font-size:12px;color:var(--gray)">${esc(it.detail)}</td>
     </tr>`).join('')}</tbody></table>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
@@ -726,19 +965,18 @@ function renderCadResult(){
     <div class="err" id="cadSaveErr"></div>
     <p style="font-size:12px;color:var(--gray);margin-top:8px">"Add to draft" continues your in-progress quantification editor. "Save as Quantification" saves the checked items straight into a new quantification (using the Project Title / Department above) that shows up under Quantified CADs, ready to be checked, edited or deleted later. Either way, review descriptions, quantities and rates before finalizing.</p>
   </div>`;
+  window._cadResultRows=rows;
 }
-function collectCheckedCadItems(){
-  return cadCalc.items.map((it,i)=>{
+function cadCollectCheckedItems(){
+  const rows=window._cadResultRows||[];
+  return rows.map((it,i)=>{
     if(!$('#cadChk'+i).checked)return null;
     const qty=Number($('#cadQty'+i).value)||0;
-    const description=it.suggested?it.suggested.name:it.label;
-    const unit=it.suggested?it.suggested.unit:it.unit;
-    const rate=it.suggested?it.suggested.price:'';
-    return{description,unit,qty,rate,detail:it.detail};
+    return{description:it.description,unit:it.unit,qty,rate:it.rate,detail:it.detail};
   }).filter(Boolean);
 }
 function cadAddToDraft(){
-  const newLines=collectCheckedCadItems().map(({description,unit,qty,rate})=>({description,unit,qty,rate}));
+  const newLines=cadCollectCheckedItems().map(({description,unit,qty,rate})=>({description,unit,qty,rate}));
   if(!newLines.length){alert('No items checked.');return;}
   let d=loadDraft();
   if(!d)d={title:$('#cadTitle')?.value||'',department:$('#cadDept')?.value||me.department||DEPTS[3],gst_rate:8,checked_by:me.name,checked_designation:me.designation||'',approved_by:'',approved_designation:'',lines:[]};
@@ -751,7 +989,7 @@ function cadAddToDraft(){
   editorView();
 }
 async function cadDownloadExcel(){
-  const checked=collectCheckedCadItems();
+  const checked=cadCollectCheckedItems();
   if(!checked.length){alert('No items checked.');return;}
   const title=($('#cadTitle')?.value||'CAD Takeoff').trim();
   try{
@@ -770,7 +1008,7 @@ async function cadSaveQuantification(){
   const department=$('#cadDept')?.value;
   $('#cadSaveErr').textContent='';
   if(!title){$('#cadSaveErr').textContent='Enter a Project Title at the top of the page first.';return;}
-  const lines=collectCheckedCadItems().map(({description,unit,qty,rate})=>({description,unit,qty,rate}));
+  const lines=cadCollectCheckedItems().map(({description,unit,qty,rate})=>({description,unit,qty,rate}));
   if(!lines.length){$('#cadSaveErr').textContent='No items checked.';return;}
   try{
     const r=await api('/quantifications',{method:'POST',body:JSON.stringify({title,department,gst_rate:8,lines,source:'CAD',
@@ -783,7 +1021,7 @@ async function cadSaveQuantification(){
 async function cadListView(){
   const rows=await api('/quantifications?source=CAD');
   $('#cadSubArea').innerHTML=`<div class="card"><h2>Quantified CADs</h2>
-  <table><thead><tr><th>Title</th><th>Department</th><th>By</th><th>Updated</th><th style="text-align:right;padding-right:20px">Grand Total</th><th style="width:180px"></th></tr></thead>
+  <div style="overflow-x:auto"><table><thead><tr><th>Title</th><th>Department</th><th>By</th><th>Updated</th><th style="text-align:right;padding-right:20px">Grand Total</th><th style="width:180px"></th></tr></thead>
   <tbody>${rows.map(q=>{
     const grand=(q.subtotal||0)*(1+(q.gst_rate||0)/100);
     const mine=q.created_by===me.id||me.role==='ADMIN';
@@ -794,243 +1032,128 @@ async function cadListView(){
       <button class="btn sm brand" onclick="dlPdf(${q.id})">PDF</button>
       ${me.role==='ADMIN'?`<button class="btn sm danger" onclick="delQuant(${q.id},cadListView)">Del</button>`:''}
     </div></td></tr>`;}).join('')||'<tr><td colspan="6" style="color:#999">No CAD-derived quantifications yet. Use Drawing Takeoff to create one.</td></tr>'}
-  </tbody></table></div>`;
+  </tbody></table></div></div>`;
 }
 
-// ---- page 3: Takeoff Settings (legend library + materials) ----
-let cadLegendEditId=null,cadSettingsMode='legend',cadMaterialsLegend=null,cadMatEditId=null,cadMatItemPick=null,matItemDDEl=null;
-function cadLegendFormHTML(prefix,lg,allLegends){
-  lg=lg||{name:'',measure_type:'LENGTH',output_unit:'m',waste_pct:5,detail:'',coverage_len_mm:'',coverage_wid_mm:'',coverage_gap_mm:'',thickness_mm:'',use_height:0,height_m:'',is_opening:0,opening_area_m2:'',nets_from:'[]'};
-  let netsFrom=[]; try{netsFrom=JSON.parse(lg.nets_from||'[]');}catch{netsFrom=[];}
-  const openingCandidates=(allLegends||[]).filter(o=>o.is_opening&&o.name!==lg.name);
-  return `
-    <div class="row2">
-      <div><label>Legend Name</label><input id="${prefix}Name" value="${esc(lg.name)}" placeholder="e.g. WALL - BLOCKWORK"></div>
-      <div><label>Measure Type</label><select id="${prefix}Type" onchange="cadLegendFormToggle('${prefix}')">
-        <option value="LENGTH" ${lg.measure_type==='LENGTH'?'selected':''}>Length (e.g. cabling, fencing, wall run, pipe)</option>
-        <option value="AREA" ${lg.measure_type==='AREA'?'selected':''}>Area (e.g. flooring, roofing, painting)</option>
-        <option value="COUNT" ${lg.measure_type==='COUNT'?'selected':''}>Count (e.g. sockets, lights, fans, doors, windows)</option>
-      </select></div>
+// ---- page 3: Materials ----
+// Materials are fully standalone — no legend to belong to (the old CAD module's legend library
+// concept was dropped along with its schema; see db.js). A material with ingredients added is a
+// recipe (e.g. "Plastering" = cement + fine sand); one with none is reported as itself (e.g.
+// "Parquet" = so many planks). Length/width/height/thickness/coverage tell Calculate how to turn
+// a detected length/area/count into a real quantity of the material.
+let cadMatEditId=null, cadMatPick=[], cadMatModalOpen=false;
+async function cadMaterialsView(){
+  cadMatEditId=null;cadMatPick=[];cadMatModalOpen=false;
+  $('#cadSubArea').innerHTML=`<div id="cadMatArea"></div><div id="cadMatModalArea"></div>`;
+  cadRenderMaterialsPage();
+}
+function cadMaterialDimsSummary(m){
+  const parts=[];
+  if(m.length_mm&&m.width_mm)parts.push(`${m.length_mm}x${m.width_mm}mm`+(m.height_mm?`x${m.height_mm}mm`:''));
+  else if(m.height_mm)parts.push(`height ${m.height_mm}mm`);
+  if(m.coverage_m2)parts.push(`${m.coverage_m2}m² coverage`);
+  if(m.thickness_mm)parts.push(`${m.thickness_mm}mm thick`);
+  return parts.join(', ')||'—';
+}
+function cadOpenAddMaterial(){cadMatEditId=null;cadMatPick=[];cadMatModalOpen=true;cadRenderMaterialsPage();}
+function closeMaterialModal(){cadMatEditId=null;cadMatPick=[];cadMatModalOpen=false;cadRenderMaterialsPage();}
+async function cadRenderMaterialsPage(){
+  const materials=await api('/cad/materials');
+  const items=await api('/items');
+  window._cadItems=items;
+  const admin=me.role==='ADMIN';
+  $('#cadMatArea').innerHTML=`<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h2 style="margin-bottom:0">Materials (${materials.length})</h2>
+      ${admin?`<button class="btn brand fab" style="width:34px;height:34px;border-radius:50%;font-size:18px;line-height:1;padding:0;margin-top:0" title="Add material" onclick="cadOpenAddMaterial()">+</button>`:''}
     </div>
-    <div class="row2" style="margin-top:8px">
-      <div><label>Output Unit</label><input id="${prefix}Unit" value="${esc(lg.output_unit)}" placeholder="m, m², m³, Nos"></div>
-      <div><label>Waste / Overage %</label><input id="${prefix}Waste" type="number" step="any" value="${lg.waste_pct}"></div>
-    </div>
-    <label>Detail / Spec — fallback note (e.g. "2.5mm wire", "12mm thickness") shown only when no Material is picked at takeoff time; once a Material is selected, its own name carries the spec instead</label><input id="${prefix}Detail" value="${esc(lg.detail||'')}">
-
-    <div id="${prefix}FieldElevation" style="margin-top:14px;padding:12px;background:#f9fafb;border-radius:8px">
-      <label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400"><input type="checkbox" id="${prefix}UseHeight" style="width:auto" ${lg.use_height?'checked':''} onchange="cadLegendFormToggle('${prefix}')"> This is a vertical run (a wall, fence, etc.) — derive its area from the drawn length × a height, instead of the raw drawn length/area</label>
-      <div id="${prefix}FieldHeight" class="row2" style="margin-top:8px">
-        <div><label>Default Height (m)</label><input id="${prefix}Height" type="number" step="any" value="${lg.height_m??''}" placeholder="e.g. 3"></div>
-        <div><label>Net Openings From</label><div id="${prefix}NetsFrom" style="border:1px solid #d1d5db;border-radius:6px;padding:8px;max-height:120px;overflow-y:auto">
-          ${openingCandidates.length?openingCandidates.map(o=>`<label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400;font-size:13px;padding:2px 0"><input type="checkbox" value="${esc(o.name)}" style="width:auto" ${netsFrom.includes(o.name)?'checked':''}> ${esc(o.name)}</label>`).join(''):'<span style="font-size:12px;color:var(--gray)">No legends are marked as an "opening" yet — mark e.g. DOORS or WINDOWS as one below to net them out here.</span>'}
-        </div></div>
+    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">Add materials here directly — no legend needed. A material with ingredients added below is a recipe (e.g. "Plastering" = 1 bag cement + 4 bags fine sand per m²); one with no ingredients is reported as itself (e.g. "Parquet" = so many planks). Dimensions/coverage tell Calculate how to turn a detected length/area/count into a real quantity.</p>
+    <div style="overflow-x:auto"><table><thead><tr><th>Material</th><th>Unit</th><th>Dimensions / coverage</th><th>Ingredients</th>${admin?'<th></th>':''}</tr></thead>
+    <tbody>${materials.map(m=>`<tr><td>${esc(m.name)}</td><td style="font-size:12px;color:var(--gray)">${esc(m.unit)}</td><td style="font-size:12px;color:var(--gray)">${esc(cadMaterialDimsSummary(m))}</td><td style="font-size:12px;color:var(--gray)">${m.ingredients.map(i=>`${i.qty_per_unit} ${esc(i.item_unit)} ${esc(i.item_name)}`).join(', ')||'none (simple material)'}</td>
+    ${admin?`<td style="white-space:nowrap"><div class="actions"><button class="btn sm" onclick="cadEditMaterial(${m.id})">Edit</button> <button class="btn sm danger" onclick="cadDelMaterial(${m.id})">Del</button></div></td>`:''}</tr>`).join('')||`<tr><td colspan="${admin?5:4}" style="color:#999">No materials yet${admin?' — press + to add one.':'.'}</td></tr>`}</tbody></table></div>
+  </div>`;
+  if(admin)cadRenderMaterialModal(materials);
+}
+function cadRenderMaterialModal(materials){
+  if(!cadMatModalOpen){$('#cadMatModalArea').innerHTML='';return;}
+  const editing=cadMatEditId?materials.find(m=>m.id===cadMatEditId):null;
+  if(editing && cadMatPick.length===0 && editing.ingredients.length)cadMatPick=editing.ingredients.map(i=>({item_id:i.item_id,name:i.item_name,unit:i.item_unit,qty_per_unit:i.qty_per_unit,price_override:i.price_override}));
+  const m=editing||{name:'',unit:'Nos',length_mm:'',width_mm:'',height_mm:'',thickness_mm:'',coverage_m2:'',waste_pct:10,price:''};
+  $('#cadMatModalArea').innerHTML=`<div class="modal-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto;z-index:50" onclick="closeMaterialModal()">
+    <div class="modal card" style="max-width:640px;width:100%;margin:0" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><h2 style="margin-bottom:0">${editing?'Edit material':'Add material'}</h2><button class="btn sm" onclick="closeMaterialModal()">✕</button></div>
+      <div class="row2">
+        <div><label>Material name</label><input id="cadMatName" value="${esc(m.name)}" placeholder="e.g. Plastering, Parquet, 2.5mm Wire"></div>
+        <div><label>Unit (how this material is counted)</label><input id="cadMatUnit" value="${esc(m.unit)}" placeholder="Nos / m / m² / m³ / L / Bag"></div>
       </div>
-    </div>
-
-    <div style="margin-top:14px;padding:12px;background:#f9fafb;border-radius:8px">
-      <label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400"><input type="checkbox" id="${prefix}IsOpening" style="width:auto" ${lg.is_opening?'checked':''} onchange="cadLegendFormToggle('${prefix}')"> This legend is an opening (doors, windows...) that other vertical-run legends can subtract</label>
-      <div id="${prefix}FieldOpenArea" style="margin-top:8px"><label>Typical Opening Size (m² each, used only for netting)</label><input id="${prefix}OpenArea" type="number" step="any" value="${lg.opening_area_m2??''}" placeholder="e.g. 1.89 for a 0.9m x 2.1m door"></div>
-    </div>
-
-    <p style="font-size:12px;color:var(--gray);margin-top:12px">Optional, for Area-type legends (or Length-type with the vertical-run box above checked): fill Coverage Length/Width to convert the area into a unit count (e.g. tiles, bricks, boards), OR fill Thickness to convert it into a volume (e.g. concrete, excavation, plaster). These are also this legend's <b>default</b> spec — a specific Material chosen at takeoff time (below, once saved) overrides them. Leave all blank to keep the raw area.</p>
-    <div class="row2">
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
-        <div><label>Coverage Length (mm)</label><input id="${prefix}CovL" type="number" step="any" value="${lg.coverage_len_mm??''}"></div>
-        <div><label>Coverage Width (mm)</label><input id="${prefix}CovW" type="number" step="any" value="${lg.coverage_wid_mm??''}"></div>
-        <div><label>Coverage Gap (mm)</label><input id="${prefix}CovG" type="number" step="any" value="${lg.coverage_gap_mm??''}"></div>
+      <div class="row2" style="margin-top:8px">
+        <div><label>Length (mm)</label><input id="cadMatLen" type="number" step="any" value="${m.length_mm??''}" placeholder="piece length, e.g. plank/tile/block" oninput="cadSyncCoverageFromDims()"></div>
+        <div><label>Width (mm)</label><input id="cadMatWid" type="number" step="any" value="${m.width_mm??''}" placeholder="piece width" oninput="cadSyncCoverageFromDims()"></div>
       </div>
-      <div><label>Thickness (mm)</label><input id="${prefix}Thick" type="number" step="any" value="${lg.thickness_mm??''}"></div>
-    </div>`;
+      <div class="row2" style="margin-top:8px">
+        <div><label>Height (mm)</label><input id="cadMatHt" type="number" step="any" value="${m.height_mm??''}" placeholder="e.g. wall height, for a vertical run"></div>
+        <div><label>Thickness (mm)</label><input id="cadMatThick" type="number" step="any" value="${m.thickness_mm??''}" placeholder="turns an area into a volume, e.g. concrete"></div>
+      </div>
+      <div class="row2" style="margin-top:8px">
+        <div><label>Area coverage (m² per unit)</label><input id="cadMatCov" type="number" step="any" value="${m.coverage_m2??''}" placeholder="e.g. paint, plastering — overrides length x width" oninput="cadSyncDimsFromCoverage()"></div>
+        <div><label>Waste %</label><input id="cadMatWaste" type="number" step="any" value="${m.waste_pct??10}"></div>
+      </div>
+      <label>Price per unit (optional)</label><input id="cadMatPrice" type="number" step="any" value="${m.price??''}" style="width:160px">
+      <p style="font-size:12px;color:var(--gray);margin-top:10px">Length x width auto-fills the area coverage for you (and vice versa) — set whichever you actually know. If you set either, Calculate works out how many pieces/units are needed to cover the detected area. Otherwise the detected quantity itself (length, area, or count) is used directly. Ingredients below scale per 1 unit of this material's own computed quantity.</p>
+      <div id="cadIngList" style="margin-top:8px"></div>
+      <button class="btn sm" onclick="cadAddIngredientRow()">+ Add ingredient</button>
+      <div style="margin-top:10px"><button class="btn brand" onclick="${editing?'cadSaveMaterial('+editing.id+')':'cadAddMaterial()'}">${editing?'Save changes':'Add material'}</button>
+      <button class="btn" onclick="closeMaterialModal()">Cancel</button></div>
+      <div class="err" id="cadMatErr"></div>
+    </div>
+  </div>`;
+  cadRenderIngredientRows();
 }
-function cadLegendFormToggle(prefix){
-  const type=$('#'+prefix+'Type').value;
-  const useHeight=$('#'+prefix+'UseHeight').checked;
-  const isOpening=$('#'+prefix+'IsOpening').checked;
-  $('#'+prefix+'FieldElevation').style.display=type==='COUNT'?'none':'';
-  $('#'+prefix+'FieldHeight').style.display=useHeight?'':'none';
-  $('#'+prefix+'FieldOpenArea').style.display=(isOpening&&type==='COUNT')?'':'none';
+function cadSyncCoverageFromDims(){
+  const l=parseFloat($('#cadMatLen').value), w=parseFloat($('#cadMatWid').value);
+  if(l>0&&w>0)$('#cadMatCov').value=Number(((l*w)/1e6).toFixed(4));
 }
-function cadLegendFormData(prefix){
-  const netsFrom=[...document.querySelectorAll('#'+prefix+'NetsFrom input[type=checkbox]:checked')].map(c=>c.value);
+function cadSyncDimsFromCoverage(){
+  const cov=parseFloat($('#cadMatCov').value);
+  if(cov>0&&!$('#cadMatLen').value&&!$('#cadMatWid').value){
+    const side=Number(Math.sqrt(cov*1e6).toFixed(1));
+    $('#cadMatLen').value=side;$('#cadMatWid').value=side;
+  }
+}
+function cadMaterialFormData(){
   return {
-    name:$('#'+prefix+'Name').value,
-    measure_type:$('#'+prefix+'Type').value,
-    output_unit:$('#'+prefix+'Unit').value,
-    waste_pct:$('#'+prefix+'Waste').value,
-    detail:$('#'+prefix+'Detail').value,
-    coverage_len_mm:$('#'+prefix+'CovL').value,
-    coverage_wid_mm:$('#'+prefix+'CovW').value,
-    coverage_gap_mm:$('#'+prefix+'CovG').value,
-    thickness_mm:$('#'+prefix+'Thick').value,
-    use_height:$('#'+prefix+'UseHeight').checked,
-    height_m:$('#'+prefix+'Height').value,
-    is_opening:$('#'+prefix+'IsOpening').checked,
-    opening_area_m2:$('#'+prefix+'OpenArea').value,
-    nets_from:netsFrom,
+    name:$('#cadMatName').value, unit:$('#cadMatUnit').value,
+    length_mm:$('#cadMatLen').value, width_mm:$('#cadMatWid').value, height_mm:$('#cadMatHt').value, thickness_mm:$('#cadMatThick').value,
+    coverage_m2:$('#cadMatCov').value, waste_pct:$('#cadMatWaste').value, price:$('#cadMatPrice').value,
+    ingredients:cadMatPick,
   };
 }
-function cadLegendForm(legends){
-  const editing=cadLegendEditId?legends.find(l=>l.id===cadLegendEditId):null;
-  return `<div class="card">
-    <h2>${editing?'Edit Legend — '+esc(editing.name):'Add Legend'}</h2>
-    ${cadLegendFormHTML('lg',editing,legends)}
-    <div style="display:flex;gap:8px;margin-top:10px">
-      <button class="btn brand" onclick="${editing?'cadSaveLegend('+editing.id+')':'cadAddLegend()'}">${editing?'Save Changes':'Add Legend'}</button>
-      ${editing?'<button class="btn" onclick="cadLegendEditId=null;cadSettingsView()">Cancel</button>':''}
-    </div>
-    <div class="err" id="lgErr"></div>
-  </div>`;
+function cadRenderIngredientRows(){
+  $('#cadIngList').innerHTML=cadMatPick.map((ing,i)=>{
+    const selectedItem=window._cadItems.find(it=>it.id===ing.item_id);
+    const priceHint=selectedItem&&(ing.price_override===''||ing.price_override==null)?` (item price: ${selectedItem.price})`:'';
+    return `
+    <div class="row2" style="grid-template-columns:2fr 1fr 1fr auto;align-items:end;margin-bottom:6px">
+      <div><label>Item</label><select onchange="cadMatPick[${i}].item_id=Number(this.value);cadRenderIngredientRows()">
+        <option value="">— pick —</option>
+        ${window._cadItems.map(it=>`<option value="${it.id}" ${ing.item_id===it.id?'selected':''}>${esc(it.name)} (${esc(it.unit)})</option>`).join('')}
+      </select></div>
+      <div><label>Qty per unit</label><input type="number" step="any" value="${ing.qty_per_unit}" oninput="cadMatPick[${i}].qty_per_unit=this.value"></div>
+      <div><label>Price per unit${priceHint?' — leave blank to use':''}</label><input type="number" step="any" value="${ing.price_override??''}" placeholder="${selectedItem?selectedItem.price:'price'}" oninput="cadMatPick[${i}].price_override=this.value"></div>
+      <button class="btn sm danger" onclick="cadMatPick.splice(${i},1);cadRenderIngredientRows()">×</button>
+    </div>`;}).join('')||'<p style="font-size:12px;color:var(--gray)">No ingredients yet — add one below.</p>';
 }
-function cadLegendRow(lg,admin,materials){
-  const tags=[lg.use_height?'<span class="tag USER" style="font-size:10px">elevation</span>':'',lg.is_opening?'<span class="tag ADMIN" style="font-size:10px">opening</span>':''].filter(Boolean).join(' ');
-  const matList=(materials&&materials.length)?esc(materials.map(m=>m.name).join(', ')):'<span style="color:var(--gray)">none</span>';
-  return `<tr><td>${esc(lg.name)} ${tags}</td><td>${lg.measure_type}</td><td>${esc(lg.output_unit)}</td><td>${lg.waste_pct}%</td><td style="font-size:12px;color:var(--gray)">${esc(lg.detail||'')}</td>
-  <td style="font-size:12px;color:var(--gray);max-width:200px">${matList}</td>
-  ${admin?`<td style="white-space:nowrap"><div class="actions"><button class="btn sm" onclick="cadManageMaterials(${lg.id})">Materials</button><button class="btn sm" onclick="cadEditLegend(${lg.id})">Edit</button><button class="btn sm danger" onclick="cadDelLegend(${lg.id})">Del</button></div></td>`:''}</tr>`;
-}
-async function cadSettingsView(){
-  const [legends,allMaterials]=await Promise.all([api('/cad/legends'),api('/cad/materials')]);
-  const admin=me.role==='ADMIN';
-  $('#cadSubArea').innerHTML=`
-    <div id="cadSettingsTop"></div>
-    <div class="card"><h2>Legend Library (${legends.length})</h2>
-    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">These are the tags available on the Drawing Takeoff page. Each legend defines how its quantity is measured: by length, area (optionally as a vertical run derived from length × height, and optionally converted to a unit count or a volume), or count. "Materials" lets you offer specific priced options (tile sizes, block sizes...) to pick from at takeoff time.</p>
-    <div style="overflow-x:auto"><table><thead><tr><th>Name</th><th>Measure</th><th>Unit</th><th>Waste %</th><th>Detail</th><th>Materials</th>${admin?'<th style="width:220px"></th>':''}</tr></thead>
-    <tbody>${legends.map(lg=>cadLegendRow(lg,admin,allMaterials.filter(m=>m.legend_id===lg.id))).join('')}</tbody></table></div>
-    </div>`;
-  if(!admin)return;
-  if(cadSettingsMode==='materials'&&cadMaterialsLegend){
-    await cadRenderMaterials();
-  }else{
-    cadSettingsMode='legend';
-    $('#cadSettingsTop').innerHTML=cadLegendForm(legends);
-    cadLegendFormToggle('lg');
-  }
-}
-async function cadAddLegend(){
-  const d=cadLegendFormData('lg');
-  try{await api('/cad/legends',{method:'POST',body:JSON.stringify(d)});cadSettingsView();}
-  catch(e){$('#lgErr').textContent=e.message;}
-}
-function cadEditLegend(id){cadLegendEditId=id;cadSettingsMode='legend';cadSettingsView();window.scrollTo(0,0);}
-async function cadDelLegend(id){
-  if(!confirm('Delete this legend? Quantifications already created from it will be unaffected.'))return;
-  await api('/cad/legends/'+id,{method:'DELETE'});
-  cadSettingsView();
-}
-async function cadSaveLegend(id){
-  const d=cadLegendFormData('lg');
-  try{await api('/cad/legends/'+id,{method:'PUT',body:JSON.stringify(d)});cadLegendEditId=null;cadSettingsView();}
-  catch(e){$('#lgErr').textContent=e.message;}
-}
-
-// -- materials (per legend) --
-async function cadManageMaterials(legendId){
-  const legends=await api('/cad/legends');
-  cadMaterialsLegend=legends.find(l=>l.id===legendId);
-  cadSettingsMode='materials';cadMatEditId=null;cadMatItemPick=null;
-  cadSettingsView();
-  window.scrollTo(0,0);
-}
-function cadMaterialFormHTML(){
-  return `
-    <div class="row2">
-      <div><label>Material Name</label><input id="matName" placeholder="e.g. 300x300 Ceramic Tile"></div>
-      <div><label>Linked Master Item (for price/unit)</label>
-        <div style="position:relative"><input id="matItemSearch" placeholder="Search master items..." autocomplete="off"></div>
-        <div id="matItemPicked" style="font-size:12px;color:var(--gray);margin-top:4px"></div>
-      </div>
-    </div>
-    <div class="row2" style="margin-top:8px">
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
-        <div><label>Coverage Length (mm)</label><input id="matCovL" type="number" step="any"></div>
-        <div><label>Coverage Width (mm)</label><input id="matCovW" type="number" step="any"></div>
-        <div><label>Coverage Gap (mm)</label><input id="matCovG" type="number" step="any"></div>
-      </div>
-      <div><label>Thickness (mm)</label><input id="matThick" type="number" step="any"></div>
-    </div>
-    <p style="font-size:12px;color:var(--gray);margin-top:8px">Fill Coverage L/W for a material that converts a face/floor area into a unit count (tiles, blocks, boards). Fill Thickness instead for one that converts area into a volume (concrete, screed). Leave both blank to just override the item/price for a raw length or count legend.</p>`;
-}
-function cadMaterialRow(m){
-  const spec=m.coverage_len_mm&&m.coverage_wid_mm?`${m.coverage_len_mm}×${m.coverage_wid_mm}mm coverage`:m.thickness_mm?`${m.thickness_mm}mm thickness`:'—';
-  return `<tr><td>${esc(m.name)}</td><td style="font-size:12px;color:var(--gray)">${spec}</td>
-  <td>${m.item_name?esc(m.item_name):'<span style="color:var(--gray)">none</span>'}</td><td>${m.item_price!=null?fmt(m.item_price):''}</td>
-  <td style="white-space:nowrap"><div class="actions"><button class="btn sm" onclick="cadEditMaterial(${m.id})">Edit</button><button class="btn sm danger" onclick="cadDelMaterial(${m.id})">Del</button></div></td></tr>`;
-}
-async function cadRenderMaterials(){
-  const lg=cadMaterialsLegend;
-  const materials=await api('/cad/materials?legend_id='+lg.id);
-  const editing=cadMatEditId?materials.find(m=>m.id===cadMatEditId):null;
-  $('#cadSettingsTop').innerHTML=`<div class="card">
-    <h2>Materials — ${esc(lg.name)}</h2>
-    <p style="font-size:12px;color:var(--gray);margin-bottom:8px">Each material is a concrete option for this legend (e.g. a specific tile or block size), linked to a priced master item. At takeoff time you'll pick one of these per drawing; if none is picked, the legend's own default coverage/thickness (Edit Legend) is used instead.</p>
-    <div style="overflow-x:auto"><table><thead><tr><th>Name</th><th>Spec</th><th>Linked Item</th><th>Price</th><th style="width:120px"></th></tr></thead>
-    <tbody>${materials.map(m=>cadMaterialRow(m)).join('')||'<tr><td colspan="5" style="color:#999">No materials yet.</td></tr>'}</tbody></table></div>
-    <h2 style="margin-top:20px">${editing?'Edit Material — '+esc(editing.name):'Add Material'}</h2>
-    ${cadMaterialFormHTML()}
-    <div style="display:flex;gap:8px;margin-top:10px">
-      <button class="btn brand" onclick="${editing?'cadSaveMaterial('+editing.id+')':'cadAddMaterial()'}">${editing?'Save Changes':'Add Material'}</button>
-      ${editing?'<button class="btn" onclick="cadMatEditId=null;cadMatItemPick=null;cadRenderMaterials()">Cancel Edit</button>':''}
-      <button class="btn" onclick="cadSettingsMode='legend';cadMaterialsLegend=null;cadMatEditId=null;cadMatItemPick=null;cadSettingsView()">Back to Legends</button>
-    </div>
-    <div class="err" id="matErr"></div>
-  </div>`;
-  if(editing){
-    $('#matName').value=editing.name;
-    $('#matCovL').value=editing.coverage_len_mm??'';
-    $('#matCovW').value=editing.coverage_wid_mm??'';
-    $('#matCovG').value=editing.coverage_gap_mm??'';
-    $('#matThick').value=editing.thickness_mm??'';
-    if(editing.item_id){cadMatItemPick={id:editing.item_id,name:editing.item_name,unit:editing.item_unit,price:editing.item_price};$('#matItemSearch').value=editing.item_name||'';$('#matItemPicked').textContent='Linked: '+editing.item_name+' ('+editing.item_unit+', '+fmt(editing.item_price)+')';}
-    else cadMatItemPick=null;
-  }else if(cadMatItemPick){
-    $('#matItemSearch').value=cadMatItemPick.name;
-    $('#matItemPicked').textContent='Linked: '+cadMatItemPick.name+' ('+cadMatItemPick.unit+', '+fmt(cadMatItemPick.price)+')';
-  }
-  const inp=$('#matItemSearch');
-  if(inp){inp.addEventListener('input',showMatItemDD);inp.addEventListener('focus',showMatItemDD);inp.addEventListener('blur',()=>setTimeout(closeMatItemDD,180));}
-}
-async function showMatItemDD(){
-  const q=$('#matItemSearch').value.trim();
-  closeMatItemDD();
-  if(q.length<2)return;
-  const results=await api('/items?q='+encodeURIComponent(q));
-  if(!results.length)return;
-  const rc=$('#matItemSearch').getBoundingClientRect();
-  matItemDDEl=document.createElement('div');
-  matItemDDEl.className='dd-list';
-  matItemDDEl.style.position='fixed';matItemDDEl.style.left=rc.left+'px';matItemDDEl.style.top=(rc.bottom+2)+'px';matItemDDEl.style.width=rc.width+'px';matItemDDEl.style.zIndex=50;
-  matItemDDEl.innerHTML=results.map(it=>`<div data-id="${it.id}"><span>${esc(it.name)}</span><small>${esc(it.unit)} · ${fmt(it.price)}</small></div>`).join('');
-  matItemDDEl.querySelectorAll('div[data-id]').forEach(d=>d.addEventListener('mousedown',e=>{
-    e.preventDefault();
-    const it=results.find(x=>x.id===+d.dataset.id);
-    cadMatItemPick=it;
-    $('#matItemSearch').value=it.name;
-    $('#matItemPicked').textContent='Linked: '+it.name+' ('+it.unit+', '+fmt(it.price)+')';
-    closeMatItemDD();
-  }));
-  document.body.appendChild(matItemDDEl);
-}
-function closeMatItemDD(){if(matItemDDEl){matItemDDEl.remove();matItemDDEl=null;}}
+function cadAddIngredientRow(){cadMatPick.push({item_id:'',qty_per_unit:0,note:''});cadRenderIngredientRows();}
 async function cadAddMaterial(){
-  const d={legend_id:cadMaterialsLegend.id,item_id:cadMatItemPick?cadMatItemPick.id:null,name:$('#matName').value,
-    coverage_len_mm:$('#matCovL').value,coverage_wid_mm:$('#matCovW').value,coverage_gap_mm:$('#matCovG').value,thickness_mm:$('#matThick').value};
-  try{await api('/cad/materials',{method:'POST',body:JSON.stringify(d)});cadMatItemPick=null;cadRenderMaterials();}
-  catch(e){$('#matErr').textContent=e.message;}
+  try{await api('/cad/materials',{method:'POST',body:JSON.stringify(cadMaterialFormData())});cadMatPick=[];cadMatModalOpen=false;cadRenderMaterialsPage();}
+  catch(e){$('#cadMatErr').textContent=e.message;}
 }
-function cadEditMaterial(id){cadMatEditId=id;cadRenderMaterials();window.scrollTo(0,0);}
+function cadEditMaterial(id){cadMatEditId=id;cadMatPick=[];cadMatModalOpen=true;cadRenderMaterialsPage();}
 async function cadSaveMaterial(id){
-  const d={item_id:cadMatItemPick?cadMatItemPick.id:null,name:$('#matName').value,
-    coverage_len_mm:$('#matCovL').value,coverage_wid_mm:$('#matCovW').value,coverage_gap_mm:$('#matCovG').value,thickness_mm:$('#matThick').value};
-  try{await api('/cad/materials/'+id,{method:'PUT',body:JSON.stringify(d)});cadMatEditId=null;cadMatItemPick=null;cadRenderMaterials();}
-  catch(e){$('#matErr').textContent=e.message;}
+  try{await api('/cad/materials/'+id,{method:'PUT',body:JSON.stringify(cadMaterialFormData())});cadMatEditId=null;cadMatPick=[];cadMatModalOpen=false;cadRenderMaterialsPage();}
+  catch(e){$('#cadMatErr').textContent=e.message;}
 }
-async function cadDelMaterial(id){
-  if(!confirm('Delete this material?'))return;
-  await api('/cad/materials/'+id,{method:'DELETE'});
-  cadRenderMaterials();
-}
+async function cadDelMaterial(id){if(confirm('Delete this material?')){await api('/cad/materials/'+id,{method:'DELETE'});cadRenderMaterialsPage();}}
 
 // ---------- admin users ----------
 async function usersView(){
