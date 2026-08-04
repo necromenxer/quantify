@@ -30,7 +30,19 @@ async function auth(req, res, next) {
     next();
   } catch { return res.status(401).json({ error: 'Invalid session' }); }
 }
+// Roles:
+//   ADMIN     - full access
+//   MANAGER   - like a normal user, except they may manage the master item list
+//   ARCHITECT - like a normal user, except they may manage CAD Quantify materials
+//   USER      - standard access
+const ROLES = ['ADMIN', 'MANAGER', 'ARCHITECT', 'USER'];
 const adminOnly = (req, res, next) => req.user.role === 'ADMIN' ? next() : res.status(403).json({ error: 'Admin only' });
+// add/edit/delete items in the master list
+const itemManager = (req, res, next) => ['ADMIN', 'MANAGER'].includes(req.user.role)
+  ? next() : res.status(403).json({ error: 'Only admins and managers can change the item list' });
+// add/edit/delete CAD Quantify materials
+const materialManager = (req, res, next) => ['ADMIN', 'ARCHITECT'].includes(req.user.role)
+  ? next() : res.status(403).json({ error: 'Only admins and architects can change CAD materials' });
 
 app.post('/api/register', wrap(async (req, res) => {
   const { email, name, password } = req.body || {};
@@ -915,7 +927,7 @@ app.get('/api/cad/materials', auth, wrap(async (req, res) => {
   }
   res.json(materials);
 }));
-app.post('/api/cad/materials', auth, adminOnly, wrap(async (req, res) => {
+app.post('/api/cad/materials', auth, materialManager, wrap(async (req, res) => {
   const f = cadMaterialFields(req.body);
   if (!f.name) return res.status(400).json({ error: 'Material name required' });
   const info = await db.run(
@@ -926,7 +938,7 @@ app.post('/api/cad/materials', auth, adminOnly, wrap(async (req, res) => {
   await cadSaveIngredients(matId, req.body.ingredients);
   res.json({ ok: true, id: matId });
 }));
-app.put('/api/cad/materials/:id', auth, adminOnly, wrap(async (req, res) => {
+app.put('/api/cad/materials/:id', auth, materialManager, wrap(async (req, res) => {
   const f = cadMaterialFields(req.body);
   if (!f.name) return res.status(400).json({ error: 'Material name required' });
   await db.run(
@@ -937,7 +949,7 @@ app.put('/api/cad/materials/:id', auth, adminOnly, wrap(async (req, res) => {
   await cadSaveIngredients(req.params.id, req.body.ingredients);
   res.json({ ok: true });
 }));
-app.delete('/api/cad/materials/:id', auth, adminOnly, wrap(async (req, res) => {
+app.delete('/api/cad/materials/:id', auth, materialManager, wrap(async (req, res) => {
   await db.run('DELETE FROM cad_materials WHERE id = ?', [req.params.id]);
   res.json({ ok: true });
 }));
@@ -1114,7 +1126,7 @@ app.post('/api/cad/calculate', auth, wrap(async (req, res) => {
 }));
 
 // scan the whole list for likely duplicate groups (admin tool)
-app.get('/api/items/duplicates', auth, adminOnly, wrap(async (req, res) => {
+app.get('/api/items/duplicates', auth, itemManager, wrap(async (req, res) => {
   const items = await db.all('SELECT id, name, unit, price FROM items WHERE active = 1 ORDER BY id');
   const groups = [];
   const used = new Set();
@@ -1142,7 +1154,7 @@ app.get('/api/items/duplicates', auth, adminOnly, wrap(async (req, res) => {
 }));
 
 // bulk add from spreadsheet (admin): body { items: [{name, unit, price}] }
-app.post('/api/items/bulk', auth, adminOnly, wrap(async (req, res) => {
+app.post('/api/items/bulk', auth, itemManager, wrap(async (req, res) => {
   const list = Array.isArray(req.body?.items) ? req.body.items : [];
   if (!list.length) return res.status(400).json({ error: 'No rows found' });
   if (list.length > 2000) return res.status(400).json({ error: 'Too many rows (max 2000)' });
@@ -1161,7 +1173,7 @@ app.post('/api/items/bulk', auth, adminOnly, wrap(async (req, res) => {
   res.json({ ok: true, added, skipped, invalid });
 }));
 
-app.post('/api/items', auth, adminOnly, wrap(async (req, res) => {
+app.post('/api/items', auth, itemManager, wrap(async (req, res) => {
   const { name, unit, price, force } = req.body || {};
   if (!name || price === undefined || isNaN(price)) return res.status(400).json({ error: 'Name and valid price required' });
   if (!force) {
@@ -1173,7 +1185,7 @@ app.post('/api/items', auth, adminOnly, wrap(async (req, res) => {
   res.json({ ok: true, id: info.lastInsertRowid });
 }));
 
-app.put('/api/items/:id', auth, adminOnly, wrap(async (req, res) => {
+app.put('/api/items/:id', auth, itemManager, wrap(async (req, res) => {
   const { name, unit, price } = req.body || {};
   const before = await db.get('SELECT name, unit, price FROM items WHERE id = ?', [req.params.id]);
   await db.run('UPDATE items SET name = COALESCE(?, name), unit = COALESCE(?, unit), price = COALESCE(?, price) WHERE id = ?',
@@ -1184,7 +1196,7 @@ app.put('/api/items/:id', auth, adminOnly, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
-app.delete('/api/items/:id', auth, adminOnly, wrap(async (req, res) => {
+app.delete('/api/items/:id', auth, itemManager, wrap(async (req, res) => {
   const it = await db.get('SELECT name, price FROM items WHERE id = ?', [req.params.id]);
   await db.run('UPDATE items SET active = 0 WHERE id = ?', [req.params.id]);
   if (it) await audit(req.user, 'ITEM_DELETE', it.name + ' @ ' + it.price);
@@ -1192,6 +1204,12 @@ app.delete('/api/items/:id', auth, adminOnly, wrap(async (req, res) => {
 }));
 
 const DEPTS_OK = d => DEPARTMENTS.includes(d);
+// SERVICE = work requested by other departments (maintenance / renovation)
+// PR      = purchase requests
+// CAD     = produced by the CAD Quantify module (kept in its own tab)
+const QUANT_TYPES = ['SERVICE', 'PR', 'CAD'];
+const normalizeType = t => QUANT_TYPES.includes(t) ? t : 'SERVICE';
+
 const canEdit = (user, q) => user.role === 'ADMIN' || Number(q.created_by) === user.id;
 
 async function loadQuant(id) {
@@ -1204,13 +1222,20 @@ async function loadQuant(id) {
 app.get('/api/quantifications', auth, wrap(async (req, res) => {
   const dept = req.query.department;
   const source = req.query.source;
+  const createdBy = req.query.created_by;
   const base = 'SELECT q.id, q.title, q.department, q.created_at, q.updated_at, q.created_by, q.source, u.name AS creator_name, (SELECT ROUND(SUM(qty*rate),2) FROM quantification_lines l WHERE l.quantification_id = q.id) AS subtotal, q.gst_rate FROM quantifications q JOIN users u ON u.id = q.created_by';
   const conds = [], args = [];
   if (dept && DEPTS_OK(dept)) { conds.push('q.department = ?'); args.push(dept); }
-  if (source === 'CAD' || source === 'MANUAL') { conds.push('q.source = ?'); args.push(source); }
+  if (QUANT_TYPES.includes(source)) { conds.push('q.source = ?'); args.push(source); }
+  if (createdBy) { conds.push('q.created_by = ?'); args.push(Number(createdBy)); }
   const where = conds.length ? ' WHERE ' + conds.join(' AND ') : '';
   const rows = await db.all(base + where + ' ORDER BY q.updated_at DESC', args);
   res.json(rows);
+}));
+
+// distinct creators, for the "filter by user" dropdown on the list screens
+app.get('/api/quantifications/creators', auth, wrap(async (req, res) => {
+  res.json(await db.all('SELECT DISTINCT u.id, u.name FROM quantifications q JOIN users u ON u.id = q.created_by ORDER BY u.name'));
 }));
 
 app.get('/api/quantifications/:id', auth, wrap(async (req, res) => {
@@ -1235,7 +1260,7 @@ app.post('/api/quantifications', auth, wrap(async (req, res) => {
   const { title, department, gst_rate, lines, checked_by, checked_designation, approved_by, approved_designation, source } = req.body || {};
   if (!title || !DEPTS_OK(department)) return res.status(400).json({ error: 'Title and valid department required' });
   const info = await db.run('INSERT INTO quantifications (title, department, gst_rate, checked_by, checked_designation, approved_by, approved_designation, created_by, source) VALUES (?,?,?,?,?,?,?,?,?)',
-    [title.trim(), department, gst_rate !== undefined ? Number(gst_rate) : 8, checked_by || '', checked_designation || '', approved_by || '', approved_designation || '', req.user.id, source === 'CAD' ? 'CAD' : 'MANUAL']);
+    [title.trim(), department, gst_rate !== undefined ? Number(gst_rate) : 8, checked_by || '', checked_designation || '', approved_by || '', approved_designation || '', req.user.id, normalizeType(source)]);
   await saveLines(info.lastInsertRowid, lines);
   res.json({ ok: true, id: info.lastInsertRowid });
 }));
@@ -1276,7 +1301,7 @@ app.get('/api/admin/users', auth, adminOnly, wrap(async (req, res) => {
 
 app.put('/api/admin/users/:id', auth, adminOnly, wrap(async (req, res) => {
   const { role, department, status, designation } = req.body || {};
-  if (role && !['ADMIN', 'USER'].includes(role)) return res.status(400).json({ error: 'Invalid role' });
+  if (role && !ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
   if (department && !DEPARTMENTS.includes(department)) return res.status(400).json({ error: 'Invalid department' });
   if (status && !['PENDING', 'ACTIVE', 'DISABLED'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
   await db.run('UPDATE users SET role = COALESCE(?, role), department = COALESCE(?, department), status = COALESCE(?, status), designation = COALESCE(?, designation) WHERE id = ?',

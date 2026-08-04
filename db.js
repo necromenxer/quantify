@@ -115,6 +115,11 @@ CREATE TABLE IF NOT EXISTS cad_symbol_names (
   try { await client.execute('ALTER TABLE users ADD COLUMN dob TEXT'); } catch {}
   try { await client.execute('ALTER TABLE users ADD COLUMN signature TEXT'); } catch {}
   try { await client.execute("ALTER TABLE quantifications ADD COLUMN source TEXT NOT NULL DEFAULT 'MANUAL'"); } catch {}
+  // Quantifications are now split into two independent kinds: SERVICE (work
+  // requested by other departments — maintenance/renovation) and PR (purchase
+  // requests). Everything previously typed as generic MANUAL becomes SERVICE.
+  // CAD-sourced quantifications keep their own 'CAD' tag and their own tab.
+  try { await client.execute("UPDATE quantifications SET source = 'SERVICE' WHERE source = 'MANUAL'"); } catch {}
   try { await client.execute('ALTER TABLE cad_material_ingredients ADD COLUMN price_override REAL'); } catch {}
   // optional link from a "simple" material (no ingredients) to a master-list item, so its price
   // can be pulled live instead of typed in and left to go stale. Additive only — materials with

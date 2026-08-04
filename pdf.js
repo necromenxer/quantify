@@ -29,41 +29,83 @@ function generatePdf(q, stream) {
   let y = 170;
   const cols = [
     { label: '#', w: 30, align: 'center' },
-    { label: 'Description', w: W - 30 - 55 - 55 - 75 - 85, align: 'left' },
+    { label: 'Description', w: W - 30 - 55 - 55 - 75 - 85, align: 'left', wrap: true },
     { label: 'Unit', w: 55, align: 'center' },
     { label: 'QTY', w: 55, align: 'center' },
     { label: 'Rate', w: 75, align: 'right' },
     { label: 'Amount', w: 85, align: 'right' },
   ];
-  const rowH = 20;
+  const rowH = 20;          // minimum / default row height
+  const PAD_X = 4, PAD_Y = 6, FS = 9;
 
-  function row(vals, opts = {}) {
-    let x = M;
-    if (opts.fill) { doc.rect(M, y, W, rowH).fill(opts.fill); doc.fillColor('#000'); }
-    doc.rect(M, y, W, rowH).strokeColor('#444').lineWidth(0.6).stroke();
+  // Work out how tall a row needs to be so nothing gets clipped. Only the
+  // Description column wraps; the rest are short values kept on one line.
+  function measureRow(vals, opts = {}) {
+    doc.font(opts.font || 'Helvetica').fontSize(FS);
+    let needed = rowH;
     cols.forEach((c, i) => {
-      if (i > 0) doc.moveTo(x, y).lineTo(x, y + rowH).stroke();
-      doc.fillColor('#000').font(opts.font || 'Helvetica').fontSize(9)
-         .text(String(vals[i] ?? ''), x + 4, y + 6, { width: c.w - 8, align: c.align, lineBreak: false });
-      x += c.w;
+      if (!c.wrap) return;
+      const txt = String(vals[i] ?? '');
+      if (!txt) return;
+      const h = doc.heightOfString(txt, { width: c.w - PAD_X * 2, align: c.align });
+      needed = Math.max(needed, h + PAD_Y * 2);
     });
-    y += rowH;
+    return needed;
   }
 
-  row(cols.map(c => c.label), { fill: '#d9d9d9', font: 'Helvetica-Bold' });
+  function row(vals, opts = {}) {
+    const h = opts.height || measureRow(vals, opts);
+    let x = M;
+    if (opts.fill) { doc.rect(M, y, W, h).fill(opts.fill); doc.fillColor('#000'); }
+    doc.rect(M, y, W, h).strokeColor('#444').lineWidth(0.6).stroke();
+    cols.forEach((c, i) => {
+      if (i > 0) doc.moveTo(x, y).lineTo(x, y + h).stroke();
+      doc.fillColor('#000').font(opts.font || 'Helvetica').fontSize(FS)
+         .text(String(vals[i] ?? ''), x + PAD_X, y + PAD_Y, {
+           width: c.w - PAD_X * 2,
+           align: c.align,
+           // wrapping columns flow onto extra lines; fixed ones stay single-line
+           lineBreak: !!c.wrap,
+           ...(c.wrap ? {} : { ellipsis: true }),
+         });
+      x += c.w;
+    });
+    y += h;
+  }
+
+  const headerVals = cols.map(c => c.label);
+  const drawHeader = () => row(headerVals, { fill: '#d9d9d9', font: 'Helvetica-Bold', height: rowH });
+  drawHeader();
+
+  // Rows can now be taller than one line, so the table may need to break onto
+  // a new page. Reserve room for the totals + signature block on the last page.
+  const CONTENT_BOTTOM = PH - 72;   // last usable y before the page footer
+  const TABLE_BOTTOM = PH - 60;     // real rows may run this low, then break page
+  // totals block (14 gap + 85) + signature block (20 gap + 105) measured from
+  // the end of the table; blank filler rows must never eat into this.
+  const BLOCK_AFTER_TABLE = 224;
+  const FILLER_BOTTOM = CONTENT_BOTTOM - BLOCK_AFTER_TABLE;
+  function ensureSpace(h) {
+    if (y + h <= TABLE_BOTTOM) return;
+    doc.addPage();
+    y = 50;
+    drawHeader();
+  }
 
   let subtotal = 0;
   const lines = q.lines || [];
   const nRows = Math.max(lines.length, 15);
   for (let i = 0; i < nRows; i++) {
     const l = lines[i];
-    if (l) {
-      const amt = (Number(l.qty) || 0) * (Number(l.rate) || 0);
-      subtotal += amt;
-      row([i + 1, l.description, l.unit, l.qty, fmt(l.rate), fmt(amt)]);
-    } else {
-      row([i + 1, '', '', '', '', '0']);
-    }
+    const vals = l
+      ? [i + 1, l.description, l.unit, l.qty, fmt(l.rate), fmt((Number(l.qty) || 0) * (Number(l.rate) || 0))]
+      : [i + 1, '', '', '', '', '0'];
+    if (l) subtotal += (Number(l.qty) || 0) * (Number(l.rate) || 0);
+    const h = measureRow(vals);
+    // blank padding rows never push the totals/signature block onto a new page
+    if (!l && y + h > FILLER_BOTTOM) break;
+    ensureSpace(h);
+    row(vals, { height: h });
   }
 
   const gst = subtotal * (Number(q.gst_rate) || 0) / 100;
@@ -71,6 +113,8 @@ function generatePdf(q, stream) {
 
   // ---- Totals block (right aligned, like the official format) ----
   y += 14;
+  // totals (~85pt) + signature block (~125pt) must stay together on one page
+  if (y + (BLOCK_AFTER_TABLE - 14) > CONTENT_BOTTOM) { doc.addPage(); y = 50; }
   const tx = M + W - 260;
   doc.font('Helvetica-Bold').fontSize(10).fillColor('#000').text('Matericals Cost', tx, y, { lineBreak: false }); y += 17;
   const trow = (label, val, bold) => {
@@ -88,7 +132,7 @@ function generatePdf(q, stream) {
   // ---- Signature block ----
   y += 20;
   const half = W / 2, sigH = 105;
-  if (y + sigH > PH - 90) y = PH - 90 - sigH; // keep on one page
+  // page breaks are handled above, so no clamping needed here
   doc.rect(M, y, W, 18).fill('#d9d9d9');
   doc.rect(M, y, W, sigH).strokeColor('#444').lineWidth(0.7).stroke();
   doc.moveTo(M, y + 18).lineTo(M + W, y + 18).stroke();
