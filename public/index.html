@@ -81,8 +81,7 @@ body.dark .totals .grand{border-color:#e5e7eb}
 <header>
   <div><h1>Quanti<span>Fy</span></h1><small>DEVELOPMENT SERVICES DIVISION · FDC</small></div>
   <nav id="nav" class="hidden">
-    <button data-view="service">Service Quantifications</button>
-    <button data-view="pr">PR Quantifications</button>
+    <button data-view="list" class="active">Quantifications</button>
     <span class="navdrop" id="newDrop">
       <button type="button" onclick="toggleNewMenu(event)">+ New ▾</button>
       <div class="navmenu hidden" id="newMenu">
@@ -259,7 +258,7 @@ async function boot(){
   $('#navAudit').style.display=me.role==='ADMIN'?'':'none';
   document.querySelectorAll('#nav button[data-view]').forEach(b=>b.onclick=()=>{
     setNavActive(b);
-    ({service:()=>listView('SERVICE'),pr:()=>listView('PR'),items:itemsView,cad:cadQuantifyView,users:usersView,audit:auditView,settings:settingsView})[b.dataset.view]();
+    ({list:()=>listView(),items:itemsView,cad:cadQuantifyView,users:usersView,audit:auditView,settings:settingsView})[b.dataset.view]();
   });
   listView('SERVICE');
 }
@@ -318,11 +317,8 @@ async function listView(type){
     </div></td></tr>`;}).join('')||`<tr><td colspan="6" style="color:#999">No ${esc(QLABEL[curType].toLowerCase())} match these filters.</td></tr>`}
   </tbody></table></div>`;
 }
-// keep the top nav highlight in step with the type dropdown
-function syncTypeNav(){
-  const v=curType==='PR'?'pr':(curType==='SERVICE'?'service':null);
-  setNavActive(v?document.querySelector(`#nav button[data-view="${v}"]`):null);
-}
+// single Quantifications tab — the type filter is what separates Service / PR / CAD
+function syncTypeNav(){setNavActive(document.querySelector('#nav button[data-view="list"]'));}
 async function dlPdf(id){
   const r=await fetch('/api/quantifications/'+id+'/pdf',{headers:{Authorization:'Bearer '+token}});
   const blob=await r.blob();const a=document.createElement('a');
