@@ -13,6 +13,9 @@ header h1{font-size:20px}header h1 span{color:var(--brand)}
 header small{color:#9ca3af;display:block;font-size:11px}
 nav button{background:none;border:none;color:#d1d5db;padding:8px 14px;cursor:pointer;font-size:14px;border-radius:6px}
 nav button.active,nav button:hover{background:#374151;color:#fff}
+.navdrop{position:relative;display:inline-block}
+.navmenu{position:absolute;top:100%;left:0;background:#1f2937;border:1px solid #374151;border-radius:6px;padding:4px;min-width:210px;z-index:60;box-shadow:0 6px 16px rgba(0,0,0,.35)}
+.navmenu button{display:block;width:100%;text-align:left;white-space:nowrap}
 .userbox{font-size:13px;color:#d1d5db;display:flex;align-items:center;gap:10px}
 main{max-width:1050px;margin:24px auto;padding:0 16px}
 .card{background:#fff;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:24px;margin-bottom:20px}
@@ -43,6 +46,7 @@ tr:hover td{background:#f9fafb}
 .tag{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600}
 .tag.ACTIVE{background:#dcfce7;color:#166534}.tag.PENDING{background:#fef9c3;color:#854d0e}.tag.DISABLED{background:#fee2e2;color:#991b1b}
 .tag.ADMIN{background:#ede9fe;color:#5b21b6}.tag.USER{background:#e0f2fe;color:#075985}
+.tag.MANAGER{background:#ffedd5;color:#9a3412}.tag.ARCHITECT{background:#ccfbf1;color:#115e59}
 .deptbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
 .deptbar button{background:#fff;border:1px solid #d1d5db;padding:8px 14px;border-radius:99px;cursor:pointer;font-size:13px}
 .deptbar button.active{background:var(--dark);color:#fff;border-color:var(--dark)}
@@ -77,8 +81,15 @@ body.dark .totals .grand{border-color:#e5e7eb}
 <header>
   <div><h1>Quanti<span>Fy</span></h1><small>DEVELOPMENT SERVICES DIVISION · FDC</small></div>
   <nav id="nav" class="hidden">
-    <button data-view="list" class="active">Quantifications</button>
-    <button data-view="new">+ New</button>
+    <button data-view="service">Service Quantifications</button>
+    <button data-view="pr">PR Quantifications</button>
+    <span class="navdrop" id="newDrop">
+      <button type="button" onclick="toggleNewMenu(event)">+ New ▾</button>
+      <div class="navmenu hidden" id="newMenu">
+        <button type="button" onclick="startNew('SERVICE')">Service Quantification</button>
+        <button type="button" onclick="startNew('PR')">PR Quantification</button>
+      </div>
+    </span>
     <button data-view="items" id="navItems">Items</button>
     <button data-view="cad" id="navCad">CAD Quantify</button>
     <button data-view="users" id="navUsers">Users</button>
@@ -246,22 +257,54 @@ async function boot(){
   $('#uinfo').innerHTML=`${esc(me.name)} · <span class="tag ${me.role}">${me.role}</span> ${esc(me.department||'')}`;
   $('#navUsers').style.display=me.role==='ADMIN'?'':'none';
   $('#navAudit').style.display=me.role==='ADMIN'?'':'none';
-  document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{
-    document.querySelectorAll('#nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active');
-    ({list:listView,new:()=>editorView(),items:itemsView,cad:cadQuantifyView,users:usersView,audit:auditView,settings:settingsView})[b.dataset.view]();
+  document.querySelectorAll('#nav button[data-view]').forEach(b=>b.onclick=()=>{
+    setNavActive(b);
+    ({service:()=>listView('SERVICE'),pr:()=>listView('PR'),items:itemsView,cad:cadQuantifyView,users:usersView,audit:auditView,settings:settingsView})[b.dataset.view]();
   });
-  listView();
+  listView('SERVICE');
 }
+function setNavActive(btn){
+  document.querySelectorAll('#nav button').forEach(x=>x.classList.remove('active'));
+  if(btn)btn.classList.add('active');
+}
+function toggleNewMenu(e){e.stopPropagation();$('#newMenu').classList.toggle('hidden');}
+document.addEventListener('click',()=>{const m=$('#newMenu');if(m)m.classList.add('hidden');});
+function startNew(type){$('#newMenu').classList.add('hidden');setNavActive(null);editorView(null,type);}
 
 // ---------- quantification list ----------
-let curDept='';
-async function listView(){
-  const rows=await api('/quantifications'+(curDept?'?department='+encodeURIComponent(curDept):''));
+// Service and PR quantifications are listed strictly separately — curType is
+// always sent to the API so the two kinds can never appear in the same table.
+const QLABEL={SERVICE:'Service Quantifications',PR:'PR Quantifications',CAD:'CAD Quantifications'};
+let curDept='',curType='SERVICE',curUser='',qCreators=[];
+async function listView(type){
+  if(type)curType=type;
+  const qs=new URLSearchParams({source:curType});
+  if(curDept)qs.set('department',curDept);
+  if(curUser)qs.set('created_by',curUser);
+  const [rows,creators]=await Promise.all([api('/quantifications?'+qs.toString()),api('/quantifications/creators')]);
+  qCreators=creators;
   main.innerHTML=`<div class="deptbar">
     <button class="${curDept===''?'active':''}" onclick="curDept='';listView()">All Departments</button>
-    ${DEPTS.map(d=>`<button class="${curDept===d?'active':''}" onclick="curDept='${d}';listView()">${d}</button>`).join('')}
+    ${DEPTS.map(d=>`<button class="${curDept===d?'active':''}" onclick="curDept='${esc(d)}';listView()">${esc(d)}</button>`).join('')}
   </div>
-  <div class="card"><h2>Quantifications ${curDept?'— '+esc(curDept):''}</h2>
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+      <h2 style="margin-bottom:0">${QLABEL[curType]} ${curDept?'— '+esc(curDept):''}</h2>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <label style="margin:0;font-size:12px;color:var(--gray)">Type</label>
+        <select style="width:auto" onchange="curType=this.value;syncTypeNav();listView()">
+          <option value="SERVICE" ${curType==='SERVICE'?'selected':''}>Service Quantification</option>
+          <option value="PR" ${curType==='PR'?'selected':''}>PR Quantification</option>
+          <option value="CAD" ${curType==='CAD'?'selected':''}>CAD Quantification</option>
+        </select>
+        <label style="margin:0;font-size:12px;color:var(--gray)">User</label>
+        <select style="width:auto" onchange="curUser=this.value;listView()">
+          <option value="">All users</option>
+          ${qCreators.map(c=>`<option value="${c.id}" ${String(curUser)===String(c.id)?'selected':''}>${esc(c.name)}</option>`).join('')}
+        </select>
+        ${(curDept||curUser)?`<button class="btn sm" onclick="curDept='';curUser='';listView()">Clear filters</button>`:''}
+      </div>
+    </div>
   <table><thead><tr><th>Title</th><th>Department</th><th>By</th><th>Updated</th><th style="text-align:right;padding-right:20px">Grand Total</th><th style="width:180px"></th></tr></thead>
   <tbody>${rows.map(q=>{
     const grand=(q.subtotal||0)*(1+(q.gst_rate||0)/100);
@@ -272,8 +315,13 @@ async function listView(){
       <button class="btn sm" onclick="editorView(${q.id})">${mine?'Edit':'View'}</button>
       <button class="btn sm brand" onclick="dlPdf(${q.id})">PDF</button>
       ${me.role==='ADMIN'?`<button class="btn sm danger" onclick="delQuant(${q.id})">Del</button>`:''}
-    </div></td></tr>`;}).join('')||'<tr><td colspan="6" style="color:#999">No quantifications yet.</td></tr>'}
+    </div></td></tr>`;}).join('')||`<tr><td colspan="6" style="color:#999">No ${esc(QLABEL[curType].toLowerCase())} match these filters.</td></tr>`}
   </tbody></table></div>`;
+}
+// keep the top nav highlight in step with the type dropdown
+function syncTypeNav(){
+  const v=curType==='PR'?'pr':(curType==='SERVICE'?'service':null);
+  setNavActive(v?document.querySelector(`#nav button[data-view="${v}"]`):null);
 }
 async function dlPdf(id){
   const r=await fetch('/api/quantifications/'+id+'/pdf',{headers:{Authorization:'Bearer '+token}});
@@ -285,7 +333,7 @@ async function dlPdf(id){
 async function delQuant(id,after){if(confirm('Delete this quantification permanently?')){await api('/quantifications/'+id,{method:'DELETE'});(after||listView)();}}
 
 // ---------- editor ----------
-let lines=[],editId=null,readOnly=false;
+let lines=[],editId=null,readOnly=false,editType='SERVICE';
 function saveDraft(){
   if(editId||readOnly)return;
   try{localStorage.setItem('qf_draft',JSON.stringify({title:$('#qTitle')?.value??'',department:$('#qDept')?.value??'',gst_rate:$('#qGst')?.value??8,
@@ -294,16 +342,18 @@ function saveDraft(){
 function loadDraft(){try{return JSON.parse(localStorage.getItem('qf_draft'));}catch{return null;}}
 function clearDraft(){localStorage.removeItem('qf_draft');}
 function discardDraft(){if(confirm('Discard the unsaved quantification draft?')){clearDraft();editorView();}}
-async function editorView(id){
+async function editorView(id,type){
   editId=id||null;lines=[];readOnly=false;
   let q={title:'',department:me.department||DEPTS[3],gst_rate:8,checked_by:me.name,checked_designation:me.designation||'',approved_by:'',approved_designation:''};
   let hasDraft=false;
   if(!id){const d=loadDraft();if(d){q=d;lines=(d.lines||[]).map(l=>({description:l.description,unit:l.unit,qty:l.qty,rate:l.rate}));hasDraft=true;}}
   if(id){q=await api('/quantifications/'+id);lines=q.lines.map(l=>({description:l.description,unit:l.unit,qty:l.qty,rate:l.rate}));readOnly=!q.can_edit;}
+  // which kind of quantification this is: explicit choice > existing record > current tab
+  editType=type||q.source||curType||'SERVICE';
   if(!lines.length)lines.push({description:'',unit:'Nos',qty:'',rate:''});
   const ro=readOnly?'disabled':'';
   main.innerHTML=`<div class="card">
-    <h2>${id?(readOnly?'View':'Edit'):'New'} Quantification ${readOnly?'<span class="tag USER">read only</span>':''} ${hasDraft?'<span class="tag PENDING">draft resumed</span> <button class="btn sm danger" onclick="discardDraft()">Discard draft</button>':''}</h2>
+    <h2>${id?(readOnly?'View':'Edit'):'New'} ${esc(QLABEL[editType]||'Quantification').replace(/s$/,'')} ${readOnly?'<span class="tag USER">read only</span>':''} ${hasDraft?'<span class="tag PENDING">draft resumed</span> <button class="btn sm danger" onclick="discardDraft()">Discard draft</button>':''}</h2>
     <div class="row2">
       <div><label>Title / Project</label><input id="qTitle" value="${esc(q.title)}" ${ro}></div>
       <div><label>Department</label><select id="qDept" ${ro}>${DEPTS.map(d=>`<option ${d===q.department?'selected':''}>${d}</option>`).join('')}</select></div>
@@ -356,11 +406,13 @@ function renderLines(){
       $('#amt'+i).textContent=fmt((lines[i].qty||0)*(lines[i].rate||0));recalc();saveDraft();
     });
     inp.addEventListener('keydown',ddKeys);
-    inp.addEventListener('blur',()=>setTimeout(closeDD,180));
+    // don't close while the pointer is inside the list (e.g. dragging its
+    // scrollbar, which blurs the input without firing mousedown on the list)
+    inp.addEventListener('blur',()=>setTimeout(()=>{if(!ddOver)closeDD();},180));
   });
   recalc();
 }
-let ddEl=null,ddItems=[],ddHl=-1,ddRow=-1,ddTimer=null,ddSeq=0;
+let ddEl=null,ddItems=[],ddHl=-1,ddRow=-1,ddTimer=null,ddSeq=0,ddAnchor=null,ddOver=false;
 function showDDDebounced(inp,i){clearTimeout(ddTimer);ddTimer=setTimeout(()=>showDD(inp,i),250);}
 async function showDD(inp,i){
   const q=inp.value.trim();
@@ -381,8 +433,18 @@ async function showDD(inp,i){
   ddEl.style.width=rc.width+'px';
   ddEl.style.right='auto';
   ddEl.innerHTML=ddItems.map((it,j)=>`<div data-j="${j}"><span>${esc(it.name)}</span><small>${esc(it.unit)} · ${fmt(it.price)}</small></div>`).join('');
+  // Any mousedown inside the list (including on its scrollbar) must not blur the
+  // input — blur closes the dropdown, which is why dragging the scrollbar used
+  // to dismiss it. Items still pick on their own mousedown handler below.
+  ddEl.addEventListener('mousedown',e=>e.preventDefault());
+  ddEl.addEventListener('mouseenter',()=>{ddOver=true;});
+  ddEl.addEventListener('mouseleave',()=>{ddOver=false;});
   ddEl.querySelectorAll('div[data-j]').forEach(d=>d.addEventListener('mousedown',e=>{e.preventDefault();pickDD(+d.dataset.j);}));
   document.body.appendChild(ddEl);
+  // the list is position:fixed, so keep it glued to the input if the page scrolls
+  ddAnchor=inp;
+  window.addEventListener('scroll',ddReposition,true);
+  window.addEventListener('resize',ddReposition);
 }
 function ddKeys(e){
   if(!ddEl)return;
@@ -397,9 +459,25 @@ function pickDD(j){
   closeDD();renderLines();saveDraft();
   const qtyInp=document.querySelector(`input[data-i="${ddRow}"][data-f="qty"]`);if(qtyInp)qtyInp.focus();
 }
-function closeDD(){if(ddEl){ddEl.remove();ddEl=null;}}
-window.addEventListener('scroll',closeDD,true);
-window.addEventListener('resize',closeDD);
+function closeDD(){
+  if(ddEl){ddEl.remove();ddEl=null;}
+  ddAnchor=null;ddOver=false;
+  window.removeEventListener('scroll',ddReposition,true);
+  window.removeEventListener('resize',ddReposition);
+}
+// Keep the fixed-position list attached to its input when the page scrolls.
+// Scrolling *inside* the list must be ignored, otherwise the list closes the
+// moment you try to scroll through the results.
+function ddReposition(e){
+  if(!ddEl||!ddAnchor)return;
+  if(e&&e.target instanceof Node&&ddEl.contains(e.target))return;
+  const rc=ddAnchor.getBoundingClientRect();
+  // input scrolled out of view — drop the list rather than leaving it floating
+  if(rc.bottom<0||rc.top>window.innerHeight){closeDD();return;}
+  ddEl.style.left=rc.left+'px';
+  ddEl.style.top=(rc.bottom+1)+'px';
+  ddEl.style.width=rc.width+'px';
+}
 function recalc(){
   const sub=lines.reduce((s,l)=>s+(Number(l.qty)||0)*(Number(l.rate)||0),0);
   const gst=sub*(Number($('#qGst')?.value)||0)/100;
@@ -408,11 +486,13 @@ function recalc(){
 async function saveQuant(){
   const body={title:$('#qTitle').value,department:$('#qDept').value,gst_rate:Number($('#qGst').value),
     lines,checked_by:$('#qChk').value,checked_designation:$('#qChkD').value,
-    approved_by:$('#qApp').value,approved_designation:$('#qAppD').value};
+    approved_by:$('#qApp').value,approved_designation:$('#qAppD').value,source:editType};
   try{
     if(editId)await api('/quantifications/'+editId,{method:'PUT',body:JSON.stringify(body)});
     else{await api('/quantifications',{method:'POST',body:JSON.stringify(body)});clearDraft();}
-    listView();
+    // land back on the list for the kind we just saved
+    curType=(editType==='CAD')?curType:editType;
+    syncTypeNav();listView();
   }catch(e){$('#qErr').textContent=e.message;}
 }
 
@@ -420,7 +500,7 @@ async function saveQuant(){
 let editingItemId=null;
 async function itemsView(filter=''){
   const items=await api('/items'+(filter?'?q='+encodeURIComponent(filter):''));
-  const admin=me.role==='ADMIN';
+  const admin=['ADMIN','MANAGER'].includes(me.role); // item list is managed by admins and managers
   main.innerHTML=`<div class="card"><h2>Items (${items.length}${filter?' shown':''})</h2>
     ${admin?`<div class="row2" style="align-items:end">
       <div><label>New Item Name</label><input id="niName"></div>
@@ -1066,7 +1146,7 @@ async function cadRenderMaterialsPage(){
   const materials=await api('/cad/materials');
   const items=await api('/items');
   window._cadItems=items;
-  const admin=me.role==='ADMIN';
+  const admin=['ADMIN','ARCHITECT'].includes(me.role); // CAD materials are managed by admins and architects
   $('#cadMatArea').innerHTML=`<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
       <h2 style="margin-bottom:0">Materials (${materials.length})</h2>
@@ -1197,7 +1277,7 @@ async function usersView(){
   <div style="overflow-x:auto"><table style="min-width:820px"><thead><tr><th>Name</th><th>Email</th><th style="width:110px">Role</th><th style="width:200px">Department</th><th style="width:80px">Status</th><th style="width:100px"></th></tr></thead>
   <tbody>${users.map(u=>`<tr>
     <td><b>${esc(u.name)}</b></td><td>${esc(u.email)}</td>
-    <td><select style="width:100px" onchange="updUser(${u.id},'role',this.value)"><option ${u.role==='USER'?'selected':''}>USER</option><option ${u.role==='ADMIN'?'selected':''}>ADMIN</option></select></td>
+    <td><select style="width:120px" onchange="updUser(${u.id},'role',this.value)">${['USER','ARCHITECT','MANAGER','ADMIN'].map(r=>`<option ${u.role===r?'selected':''}>${r}</option>`).join('')}</select></td>
     <td><select style="width:190px" onchange="updUser(${u.id},'department',this.value)"><option value="">—</option>${DEPTS.map(d=>`<option ${u.department===d?'selected':''}>${d}</option>`).join('')}</select></td>
     <td><span class="tag ${u.status}">${u.status}</span></td>
     <td><div class="actions" style="white-space:nowrap">
