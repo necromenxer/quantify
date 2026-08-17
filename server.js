@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const path = require('path');
+const crypto = require('crypto');
 const multer = require('multer');
 const DxfParser = require('dxf-parser');
 const db = require('./db');
@@ -24,7 +25,7 @@ async function auth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Not logged in' });
   try {
     const payload = jwt.verify(token, SECRET);
-    const user = await db.get('SELECT id, email, name, role, department, designation, phone, dob, signature, status FROM users WHERE id = ?', [payload.id]);
+    const user = await db.get('SELECT id, email, name, role, department, designation, phone, dob, signature, status, must_change_password FROM users WHERE id = ?', [payload.id]);
     if (!user || user.status !== 'ACTIVE') return res.status(401).json({ error: 'Account not active' });
     req.user = user; req.user.id = Number(req.user.id);
     next();
@@ -66,7 +67,7 @@ app.post('/api/login', wrap(async (req, res) => {
   if (user.status === 'PENDING') return res.status(403).json({ error: 'Account awaiting admin approval' });
   if (user.status === 'DISABLED') return res.status(403).json({ error: 'Account disabled. Contact admin.' });
   const token = jwt.sign({ id: Number(user.id) }, SECRET, { expiresIn: '12h' });
-  res.json({ token, user: { id: Number(user.id), email: user.email, name: user.name, role: user.role, department: user.department, designation: user.designation, phone: user.phone, dob: user.dob, signature: user.signature } });
+  res.json({ token, user: { id: Number(user.id), email: user.email, name: user.name, role: user.role, department: user.department, designation: user.designation, phone: user.phone, dob: user.dob, signature: user.signature, must_change_password: Number(user.must_change_password) ? 1 : 0 } });
 }));
 
 app.get('/api/me', auth, (req, res) => res.json(req.user));
@@ -76,7 +77,8 @@ app.post('/api/me/password', auth, wrap(async (req, res) => {
   if (!nextPw || nextPw.length < 6) return res.status(400).json({ error: 'New password must be at least 6 characters' });
   const u = await db.get('SELECT password_hash FROM users WHERE id = ?', [req.user.id]);
   if (!bcrypt.compareSync(current || '', u.password_hash)) return res.status(400).json({ error: 'Current password is incorrect' });
-  await db.run('UPDATE users SET password_hash = ? WHERE id = ?', [bcrypt.hashSync(nextPw, 10), req.user.id]);
+  // changing the password clears any admin-forced reset flag
+  await db.run('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?', [bcrypt.hashSync(nextPw, 10), req.user.id]);
   res.json({ ok: true });
 }));
 
@@ -1311,9 +1313,47 @@ app.put('/api/admin/users/:id', auth, adminOnly, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Admin-initiated password reset. There's no mail service wired up, so instead of
+// emailing a link we generate a one-off temporary password, hand it back to the
+// admin exactly once, and force the user to pick a new one at their next login.
+function tempPassword() {
+  // avoid look-alike characters (0/O, 1/l/I) so it can be read out or written down
+  const abc = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  return Array.from(crypto.randomBytes(10)).map(b => abc[b % abc.length]).join('');
+}
+
+app.post('/api/admin/users/:id/reset-password', auth, adminOnly, wrap(async (req, res) => {
+  const target = await db.get('SELECT id, email, name FROM users WHERE id = ?', [req.params.id]);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  const pw = tempPassword();
+  await db.run('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?',
+    [bcrypt.hashSync(pw, 10), req.params.id]);
+  await audit(req.user, 'USER_PASSWORD_RESET', target.email);
+  // returned once, never stored in plain text anywhere
+  res.json({ ok: true, tempPassword: pw, name: target.name, email: target.email });
+}));
+
 app.delete('/api/admin/users/:id', auth, adminOnly, wrap(async (req, res) => {
-  if (Number(req.params.id) === req.user.id) return res.status(400).json({ error: 'Cannot delete yourself' });
-  await db.run('UPDATE users SET status = ? WHERE id = ?', ['DISABLED', req.params.id]);
+  const id = Number(req.params.id);
+  if (id === req.user.id) return res.status(400).json({ error: 'You cannot delete your own account' });
+  const target = await db.get('SELECT id, email, role, status FROM users WHERE id = ?', [id]);
+  if (!target) return res.status(404).json({ error: 'User not found' });
+  // Deleting someone who authored quantifications would orphan those records
+  // (the list view joins on created_by), so refuse and suggest disabling instead.
+  const owned = await db.get('SELECT COUNT(*) c FROM quantifications WHERE created_by = ?', [id]);
+  if (Number(owned.c) > 0) {
+    return res.status(400).json({
+      error: `This user has ${owned.c} quantification(s) and cannot be deleted. Set their status to DISABLED instead — that blocks login while keeping their records intact.`
+    });
+  }
+  // only guard against removing the final *active* admin — deleting an already
+  // disabled admin doesn't reduce the number of people who can administer the app
+  if (target.role === 'ADMIN' && target.status === 'ACTIVE') {
+    const admins = await db.get("SELECT COUNT(*) c FROM users WHERE role = 'ADMIN' AND status = 'ACTIVE'");
+    if (Number(admins.c) <= 1) return res.status(400).json({ error: 'Cannot delete the last active admin' });
+  }
+  await db.run('DELETE FROM users WHERE id = ?', [id]);
+  await audit(req.user, 'USER_DELETE', target.email);
   res.json({ ok: true });
 }));
 

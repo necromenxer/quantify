@@ -114,6 +114,8 @@ CREATE TABLE IF NOT EXISTS cad_symbol_names (
   try { await client.execute('ALTER TABLE users ADD COLUMN phone TEXT'); } catch {}
   try { await client.execute('ALTER TABLE users ADD COLUMN dob TEXT'); } catch {}
   try { await client.execute('ALTER TABLE users ADD COLUMN signature TEXT'); } catch {}
+  // set when an admin resets someone's password: forces a change at next login
+  try { await client.execute('ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0'); } catch {}
   try { await client.execute("ALTER TABLE quantifications ADD COLUMN source TEXT NOT NULL DEFAULT 'MANUAL'"); } catch {}
   // Quantifications are now split into two independent kinds: SERVICE (work
   // requested by other departments — maintenance/renovation) and PR (purchase
