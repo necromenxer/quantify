@@ -9,7 +9,21 @@ const db = require('./db');
 const { generatePdf } = require('./pdf');
 const { FORMATS, detectFormat, parseToDxfShape } = require('./cadformats');
 const { parseIfc } = require('./cadifc');
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const MAX_UPLOAD_MB = 20;
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_MB * 1024 * 1024 } });
+
+// multer rejects oversized files before the route runs, and by default that
+// surfaces as an HTML error page rather than JSON. Turn it into a clear message.
+const uploadOne = field => (req, res, next) => upload.single(field)(req, res, err => {
+  if (!err) return next();
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(400).json({
+      error: `That file is larger than the ${MAX_UPLOAD_MB} MB upload limit.`,
+      detail: 'Large drawings are usually full of 3D geometry or images. Try exporting just the floor plan sheet, purging unused blocks (PURGE in AutoCAD), or saving a 2D-only copy.',
+    });
+  }
+  return res.status(400).json({ error: 'That file could not be uploaded: ' + err.message });
+});
 
 const app = express();
 const SECRET = process.env.JWT_SECRET || 'change-this-secret-in-production';
@@ -19,7 +33,21 @@ const DEPARTMENTS = ['Technical Services', 'Maintenance Services', 'Infrastructu
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-const wrap = fn => (req, res) => fn(req, res).catch(e => { console.error(e); res.status(500).json({ error: 'Server error' }); });
+// Errors thrown as UserError carry a message meant for the person using the
+// app, so it's safe (and useful) to send it back. Anything else is unexpected,
+// so the user gets a reference code and the real detail goes to the log.
+class UserError extends Error {
+  constructor(message, detail) { super(message); this.expose = true; this.detail = detail || null; }
+}
+const wrap = fn => (req, res) => fn(req, res).catch(e => {
+  if (e && e.expose) return res.status(400).json({ error: e.message, detail: e.detail || undefined });
+  const ref = Math.random().toString(36).slice(2, 8).toUpperCase();
+  console.error('[' + ref + ']', e);
+  res.status(500).json({
+    error: 'Something went wrong on the server (reference ' + ref + ').',
+    detail: 'If this keeps happening, quote reference ' + ref + ' so the log can be checked.',
+  });
+});
 
 async function auth(req, res, next) {
   const h = req.headers.authorization || '';
@@ -1052,32 +1080,92 @@ async function buildIfcResponse(ifc) {
   };
 }
 
-app.post('/api/cad/parse', auth, upload.single('file'), wrap(async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const format = detectFormat(req.file.originalname, req.file.buffer);
+app.post('/api/cad/parse', auth, uploadOne('file'), wrap(async (req, res) => {
+  if (!req.file) throw new UserError('No file was uploaded.', 'Choose a drawing file, then press Analyze Drawing.');
+  const buf = req.file.buffer;
+  const name = req.file.originalname || 'the file';
+  const ext = (name.match(/\.[^.]+$/) || [''])[0].toLowerCase();
+  const sizeKb = Math.round(buf.length / 1024);
+  // tiny files round to "0 KB", which reads like a bug — show bytes instead
+  const sizeText = buf.length < 1024 ? `${buf.length} bytes` : `${sizeKb} KB`;
+
+  if (!buf.length) {
+    throw new UserError(`"${name}" is empty (0 bytes).`, 'The file may not have finished saving or copying. Re-save it from your CAD software and try again.');
+  }
+
+  const format = detectFormat(name, buf);
+
+  // Binary DXF is a real format but dxf-parser only reads the ASCII flavour,
+  // and it's an easy mistake to make since both use the .dxf extension.
+  if (buf.slice(0, 22).toString('latin1').includes('AutoCAD Binary DXF')) {
+    throw new UserError(
+      `"${name}" is a binary DXF, which cannot be read.`,
+      'In AutoCAD choose Save As → "AutoCAD DXF (*.dxf)" and make sure the format is ASCII, not binary. Alternatively just upload the DWG directly — the app reads DWG now.'
+    );
+  }
 
   if (format === FORMATS.PDF) {
-    // PDFs carry no reliable drawing units or object data, so they're measured
-    // by hand in the browser rather than parsed here.
-    return res.status(400).json({ error: 'PDF drawings are measured manually — use the "Measure a PDF" option on the Drawing Takeoff page instead of uploading it here.' });
+    throw new UserError(
+      'PDF drawings cannot be analysed automatically.',
+      'A PDF has no drawing units or room data, so quantities cannot be read from it reliably. Use the "Measure a PDF instead" button to set a scale and measure it by hand.'
+    );
   }
+
   if (format === FORMATS.UNKNOWN) {
-    return res.status(400).json({ error: 'Unrecognised file. Upload a DXF, DWG or IFC drawing.' });
+    throw new UserError(
+      `"${name}" is not a drawing file the app recognises.`,
+      `It was checked by both its contents and its extension (${ext || "no extension"}, ${sizeText}) and matched none of DXF, DWG or IFC. Supported: .dxf (ASCII), .dwg, .ifc. If this is a ZIP or RAR, extract it first.`
+    );
   }
+
+  // Warn when the extension lies about the contents — the file is still read
+  // correctly (detection is content-first), but it's worth telling the user.
+  const extFormat = { '.dxf': FORMATS.DXF, '.dwg': FORMATS.DWG, '.ifc': FORMATS.IFC }[ext];
+  const mismatch = extFormat && extFormat !== format
+    ? `Note: "${name}" is named ${ext} but its contents are ${format}. It was read as ${format}.`
+    : null;
 
   // IFC is a different kind of file: it carries real building objects, so it
   // gets its own reader rather than being forced through the line-work engine.
   if (format === FORMATS.IFC) {
+    if (buf.slice(0, 2).toString('latin1') === 'PK') {
+      throw new UserError(
+        `"${name}" is a compressed IFC (ifcZIP), which cannot be read directly.`,
+        'Unzip it first and upload the plain .ifc file inside.'
+      );
+    }
     let ifc;
-    try { ifc = await parseIfc(req.file.buffer); }
-    catch (e) { return res.status(400).json({ error: 'Could not read this IFC file: ' + e.message }); }
-    return res.json(await buildIfcResponse(ifc));
+    try { ifc = await parseIfc(buf); }
+    catch (e) {
+      throw new UserError(
+        `"${name}" could not be read as IFC.`,
+        `The reader stopped with: ${e.message}. The file may be truncated or use a schema the reader doesn't support (IFC2X3 and IFC4 are supported). Size read: ${sizeText}.`
+      );
+    }
+    const out = await buildIfcResponse(ifc);
+    if (mismatch) out.warning = mismatch;
+    return res.json(out);
   }
 
   let dxf;
-  try { dxf = await parseToDxfShape(format, req.file.buffer); }
-  catch (e) { return res.status(400).json({ error: e.message }); }
+  try { dxf = await parseToDxfShape(format, buf); }
+  catch (e) {
+    throw new UserError(
+      `"${name}" could not be read as ${format}.`,
+      format === FORMATS.DWG
+        ? `The DWG reader stopped with: ${e.message}. Very old (pre-R13) or very new DWG versions, and password-protected files, cannot be read. Try re-saving as "AutoCAD 2018 DWG" or exporting to DXF (ASCII). Size read: ${sizeText}.`
+        : `The DXF reader stopped with: ${e.message}. Make sure it was exported as DXF (ASCII) rather than binary, and that the export completed. Size read: ${sizeText}.`
+    );
+  }
+
   const entities = dxf.entities || [];
+  if (!entities.length) {
+    throw new UserError(
+      `"${name}" was read successfully but contains no drawing entities.`,
+      'The file opened cleanly but there is nothing in model space to measure. This usually means the drawing is empty, everything sits in a paper-space layout only, or the export excluded the geometry.'
+    );
+  }
+  req._cadWarning = mismatch;
   const layerTable = (dxf.tables && dxf.tables.layer && dxf.tables.layer.layers) || {};
   const expandedEntities = cadExpandInserts(entities, dxf.blocks || {});
   const { bySig: legendKey, keyEntities } = cadDetectLegendKey(entities, layerTable);
@@ -1150,9 +1238,17 @@ app.post('/api/cad/parse', auth, upload.single('file'), wrap(async (req, res) =>
 
   const previewGeometry = cadBuildPreviewGeometry(expandedEntities, layerTable);
   const previewBounds = cadGeometryBounds(previewGeometry);
+  const detectedUnit = cadDetectUnit(dxf);
+  const warnings = [];
+  if (req._cadWarning) warnings.push(req._cadWarning);
+  if (!detectedUnit) warnings.push('This drawing does not record its units, so millimetres have been assumed. Check the unit selector below and change it if the drawing was made in metres, feet or inches.');
+  if (!rooms.length) warnings.push('No rooms were detected. Rooms are found from closed outlines and nearby labels, so drawings where rooms are only implied by wall lines may find none. You can still measure symbols and lengths, or add areas manually in the preview.');
+
   res.json({
-    items: [...roomItems, ...wallItems, ...items], detectedUnit: cadDetectUnit(dxf), legendKeyCount: Object.keys(legendKey).length, roomCount: rooms.length,
+    items: [...roomItems, ...wallItems, ...items], detectedUnit, legendKeyCount: Object.keys(legendKey).length, roomCount: rooms.length,
     preview: { geometry: previewGeometry, bounds: previewBounds },
+    warnings: warnings.length ? warnings : undefined,
+    stats: { format, entities: entities.length, layers: Object.keys(layerTable).length, blocks: Object.keys(dxf.blocks || {}).length, sizeKb },
   });
 }));
 

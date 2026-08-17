@@ -194,8 +194,8 @@ async function parseDwg(buffer) {
 // by the caller because they don't reduce to line work.
 async function parseToDxfShape(format, buffer) {
   if (format === FORMATS.DXF) {
-    try { return new DxfParser().parseSync(buffer.toString('utf8')); }
-    catch (e) { throw new Error('Could not read this file as DXF. Make sure it was exported as DXF (ASCII), not binary.'); }
+    // rethrow the parser's own reason — the caller composes the user-facing text
+    return new DxfParser().parseSync(buffer.toString('utf8'));
   }
   if (format === FORMATS.DWG) return parseDwg(buffer);
   throw new Error('Unsupported format for drawing parsing: ' + format);
