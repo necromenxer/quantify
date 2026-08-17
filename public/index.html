@@ -871,15 +871,32 @@ async function cadTakeoffView(){
   <div id="cadResultArea"></div>`;
   if(cadParseResult)cadRenderItems();
 }
+// Show a failure with its explanation, rather than a bare "server error".
+function cadShowError(msg,detail){
+  $('#cadErr').innerHTML=`<div style="border-left:4px solid #c0392b;background:rgba(192,57,43,.08);padding:10px 12px;border-radius:4px;margin-top:10px">
+    <b style="color:#c0392b">${esc(msg)}</b>
+    ${detail?`<div style="color:var(--gray);font-size:13px;margin-top:6px;font-weight:normal">${esc(detail)}</div>`:''}
+  </div>`;
+}
 async function cadAnalyze(){
   const f=$('#cadFile').files[0];
-  $('#cadErr').textContent='';
-  if(!f){$('#cadErr').textContent='Choose a .dxf, .dwg or .ifc file first.';return;}
+  $('#cadErr').innerHTML='';
+  if(!f){cadShowError('No file chosen.','Pick a .dxf, .dwg or .ifc drawing first.');return;}
+  const btn=event&&event.target&&event.target.tagName==='BUTTON'?event.target:null;
+  if(btn){btn.disabled=true;btn.textContent='Analyzing…';}
   const fd=new FormData();fd.append('file',f);
   try{
     const r=await fetch('/api/cad/parse',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
-    const data=await r.json().catch(()=>({}));
-    if(!r.ok)throw new Error(data.error||'Could not parse file');
+    let data;
+    try{data=await r.json();}
+    catch{
+      // non-JSON reply: usually a proxy timeout or the server restarting
+      throw Object.assign(new Error(`The server returned an unreadable response (HTTP ${r.status}).`),
+        {detail:r.status===502||r.status===503
+          ? 'The server may still be starting up, or the drawing took too long to process. Wait a few seconds and try again.'
+          : 'This usually means the request was interrupted. Try again; if it persists with the same file, the file is likely the cause.'});
+    }
+    if(!r.ok)throw Object.assign(new Error(data.error||`Could not read the drawing (HTTP ${r.status}).`),{detail:data.detail});
     cadParseResult=data;
     const validUnits=['mm','cm','m','ft'];
     cadParseResult.selectedUnit=validUnits.includes(data.detectedUnit)?data.detectedUnit:'mm';
@@ -888,7 +905,26 @@ async function cadAnalyze(){
     $('#cadResultArea').innerHTML='';
     cadRenderItems();
     cadShowIfcNotes(data);
-  }catch(e){$('#cadErr').textContent=e.message;}
+    cadShowWarnings(data);
+  }catch(e){
+    cadShowError(e.message,e.detail);
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='Analyze Drawing';}
+  }
+}
+// Things that aren't failures but change how the numbers should be read —
+// assumed units, no rooms found, extension not matching contents.
+function cadShowWarnings(data){
+  const w=data.warnings||[];
+  if(!w.length&&!data.stats)return;
+  const s=data.stats;
+  const statLine=s?`Read ${s.format} · ${s.entities} entities · ${s.layers} layers · ${s.blocks} blocks · ${s.sizeKb} KB`:'';
+  $('#cadResultArea').insertAdjacentHTML('afterbegin',
+    `<div class="card" style="border-left:4px solid ${w.length?'#d68910':'var(--brand)'}">
+      <h2 style="margin-bottom:6px">${w.length?'Check these before relying on the numbers':'Drawing read'}</h2>
+      ${statLine?`<p style="font-size:12px;color:var(--gray);margin-bottom:${w.length?'8px':'0'}">${esc(statLine)}</p>`:''}
+      ${w.map(x=>`<p style="font-size:13px;color:#b9770e;margin:4px 0">• ${esc(x)}</p>`).join('')}
+    </div>`);
 }
 // IFC files vary wildly in quality. If the export left out rooms or base
 // quantities, say so plainly rather than silently returning almost nothing.
