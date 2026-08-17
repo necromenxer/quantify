@@ -367,12 +367,14 @@ function saveDraft(){
 function loadDraft(){try{return JSON.parse(localStorage.getItem('qf_draft'));}catch{return null;}}
 function clearDraft(){localStorage.removeItem('qf_draft');}
 function discardDraft(){if(confirm('Discard the unsaved quantification draft?')){clearDraft();editorView();}}
-async function editorView(id,type){
+async function editorView(id,type,seed){
   editId=id||null;lines=[];readOnly=false;
   let q={title:'',department:me.department||DEPTS[3],gst_rate:8,checked_by:me.name,checked_designation:me.designation||'',approved_by:'',approved_designation:''};
   let hasDraft=false;
   if(!id){const d=loadDraft();if(d){q=d;lines=(d.lines||[]).map(l=>({description:l.description,unit:l.unit,qty:l.qty,rate:l.rate}));hasDraft=true;}}
   if(id){q=await api('/quantifications/'+id);lines=q.lines.map(l=>({description:l.description,unit:l.unit,qty:l.qty,rate:l.rate}));readOnly=!q.can_edit;}
+  // pre-filled lines (e.g. handed over from PDF measuring) win over any draft
+  if(!id&&seed&&seed.lines&&seed.lines.length){lines=seed.lines.slice();hasDraft=false;if(seed.title)q.title=seed.title;}
   // which kind of quantification this is: explicit choice > existing record > current tab
   editType=type||q.source||curType||'SERVICE';
   if(!lines.length)lines.push({description:'',unit:'Nos',qty:'',rate:''});
@@ -672,6 +674,180 @@ async function cadQuantifyView(){
   return cadTakeoffView();
 }
 
+// ---- PDF manual measurement ----
+// A PDF drawing carries no reliable units and no object data, so nothing here
+// is guessed. The user sets the scale once by drawing a line over a dimension
+// they know, then traces shapes; every number comes from that calibration.
+let pdfDoc=null,pdfPage=null,pdfScaleMmPerPx=null,pdfMode=null,pdfPts=[],pdfShapes=[],pdfPageNum=1;
+
+async function pdfMeasureView(){
+  // pdf.js is only needed on this screen, so it's loaded on demand
+  if(!window.pdfjsLib){
+    await new Promise((res,rej)=>{
+      const s=document.createElement('script');
+      s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      s.onload=res;s.onerror=()=>rej(new Error('Could not load the PDF viewer'));
+      document.head.appendChild(s);
+    }).catch(e=>{alert(e.message);throw e;});
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+  pdfDoc=null;pdfPage=null;pdfScaleMmPerPx=null;pdfMode=null;pdfPts=[];pdfShapes=[];pdfPageNum=1;
+  $('#cadSubArea').innerHTML=`<div class="card">
+    <h2>Measure a PDF drawing</h2>
+    <p style="font-size:13px;color:var(--gray);margin-bottom:12px">
+      PDFs don't carry drawing units or room data, so measurements are taken by hand here — nothing is guessed.
+      Load the PDF, set the scale once using a dimension you already know, then trace rooms or runs to get areas and lengths.</p>
+    <label>PDF file</label><input type="file" id="pdfFile" accept=".pdf" onchange="pdfLoad(this.files[0])">
+    <div class="err" id="pdfErr"></div>
+    <div id="pdfWorkspace"></div>
+  </div>`;
+}
+
+async function pdfLoad(file){
+  if(!file)return;
+  $('#pdfErr').textContent='';
+  try{
+    const buf=await file.arrayBuffer();
+    pdfDoc=await window.pdfjsLib.getDocument({data:buf}).promise;
+    pdfPageNum=1;
+    await pdfRenderPage();
+  }catch(e){$('#pdfErr').textContent='Could not open this PDF: '+e.message;}
+}
+
+async function pdfRenderPage(){
+  pdfPage=await pdfDoc.getPage(pdfPageNum);
+  const vp=pdfPage.getViewport({scale:1.5});
+  $('#pdfWorkspace').innerHTML=`
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:12px 0">
+      <button class="btn sm" onclick="pdfSetMode('calibrate')" id="pdfBtnCal">1 · Set scale</button>
+      <button class="btn sm" onclick="pdfSetMode('area')" id="pdfBtnArea">2 · Trace an area</button>
+      <button class="btn sm" onclick="pdfSetMode('length')" id="pdfBtnLen">Measure a length</button>
+      <button class="btn sm danger" onclick="pdfUndo()">Undo point</button>
+      <button class="btn sm" onclick="pdfFinishShape()">Finish shape</button>
+      ${pdfDoc.numPages>1?`<span style="margin-left:8px;font-size:13px">Page
+        <button class="btn sm" onclick="pdfChangePage(-1)">‹</button> ${pdfPageNum} / ${pdfDoc.numPages}
+        <button class="btn sm" onclick="pdfChangePage(1)">›</button></span>`:''}
+      <span id="pdfScaleInfo" style="font-size:13px;color:var(--gray)"></span>
+    </div>
+    <p id="pdfHint" style="font-size:13px;color:var(--gray);margin-bottom:8px">Start with <b>Set scale</b>: click the two ends of a dimension you know the real length of.</p>
+    <div style="position:relative;display:inline-block;border:1px solid var(--border,#333);max-width:100%;overflow:auto">
+      <canvas id="pdfCanvas" width="${Math.round(vp.width)}" height="${Math.round(vp.height)}" style="display:block"></canvas>
+      <svg id="pdfOverlay" width="${Math.round(vp.width)}" height="${Math.round(vp.height)}"
+           style="position:absolute;left:0;top:0;cursor:crosshair" onclick="pdfClick(event)"></svg>
+    </div>
+    <div id="pdfResults"></div>`;
+  const cv=$('#pdfCanvas');
+  await pdfPage.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
+  pdfUpdateScaleInfo();pdfDrawOverlay();pdfRenderResults();
+}
+
+async function pdfChangePage(d){
+  const n=pdfPageNum+d;
+  if(n<1||n>pdfDoc.numPages)return;
+  pdfPageNum=n;pdfPts=[];pdfMode=null;
+  await pdfRenderPage();
+}
+
+function pdfSetMode(m){
+  if(m!=='calibrate'&&!pdfScaleMmPerPx){alert('Set the scale first so measurements mean something.');return;}
+  pdfMode=m;pdfPts=[];
+  const hints={calibrate:'Click the two ends of a dimension you know, then enter its real length.',
+    area:'Click each corner of the room, then press <b>Finish shape</b>.',
+    length:'Click along the run, then press <b>Finish shape</b>.'};
+  $('#pdfHint').innerHTML=hints[m];
+  ['pdfBtnCal','pdfBtnArea','pdfBtnLen'].forEach(id=>$('#'+id)?.classList.remove('brand'));
+  $({calibrate:'#pdfBtnCal',area:'#pdfBtnArea',length:'#pdfBtnLen'}[m])?.classList.add('brand');
+  pdfDrawOverlay();
+}
+
+function pdfClick(ev){
+  if(!pdfMode){alert('Pick what you want to do first — start with "Set scale".');return;}
+  const r=ev.currentTarget.getBoundingClientRect();
+  pdfPts.push({x:ev.clientX-r.left,y:ev.clientY-r.top});
+  if(pdfMode==='calibrate'&&pdfPts.length===2)return pdfFinishCalibration();
+  pdfDrawOverlay();
+}
+function pdfUndo(){pdfPts.pop();pdfDrawOverlay();}
+
+function pdfFinishCalibration(){
+  const [a,b]=pdfPts;
+  const px=Math.hypot(b.x-a.x,b.y-a.y);
+  const answer=prompt(`That line is ${px.toFixed(1)} pixels long.\n\nHow long is it on the real building, in millimetres?\n(e.g. 3500 for a 3.5 m dimension)`);
+  const mm=Number(answer);
+  if(!Number.isFinite(mm)||mm<=0){pdfPts=[];pdfDrawOverlay();return;}
+  pdfScaleMmPerPx=mm/px;
+  pdfPts=[];pdfMode=null;
+  pdfUpdateScaleInfo();pdfDrawOverlay();
+  $('#pdfHint').innerHTML='Scale set. Now use <b>Trace an area</b> or <b>Measure a length</b>.';
+}
+function pdfUpdateScaleInfo(){
+  const el=$('#pdfScaleInfo');if(!el)return;
+  el.innerHTML=pdfScaleMmPerPx
+    ? `Scale: 1 px = ${pdfScaleMmPerPx.toFixed(2)} mm`
+    : '<b style="color:#c0392b">Scale not set</b>';
+}
+
+function pdfFinishShape(){
+  if(pdfMode==='area'&&pdfPts.length>=3){
+    // shoelace on calibrated points
+    let a=0;
+    for(let i=0;i<pdfPts.length;i++){const p=pdfPts[i],q=pdfPts[(i+1)%pdfPts.length];a+=p.x*q.y-q.x*p.y;}
+    const areaPx=Math.abs(a)/2;
+    const areaM2=areaPx*pdfScaleMmPerPx*pdfScaleMmPerPx/1e6;
+    pdfShapes.push({kind:'area',label:'Area '+(pdfShapes.filter(s=>s.kind==='area').length+1),
+      value:areaM2,unit:'m²',pts:pdfPts.slice(),page:pdfPageNum});
+  }else if(pdfMode==='length'&&pdfPts.length>=2){
+    let len=0;
+    for(let i=1;i<pdfPts.length;i++)len+=Math.hypot(pdfPts[i].x-pdfPts[i-1].x,pdfPts[i].y-pdfPts[i-1].y);
+    pdfShapes.push({kind:'length',label:'Length '+(pdfShapes.filter(s=>s.kind==='length').length+1),
+      value:len*pdfScaleMmPerPx/1000,unit:'m',pts:pdfPts.slice(),page:pdfPageNum});
+  }else{alert(pdfMode==='area'?'An area needs at least 3 corners.':'A length needs at least 2 points.');return;}
+  pdfPts=[];pdfDrawOverlay();pdfRenderResults();
+}
+
+function pdfDrawOverlay(){
+  const svg=$('#pdfOverlay');if(!svg)return;
+  const done=pdfShapes.filter(s=>s.page===pdfPageNum).map(s=>{
+    const pts=s.pts.map(p=>p.x+','+p.y).join(' ');
+    return s.kind==='area'
+      ? `<polygon points="${pts}" fill="rgba(160,200,60,.35)" stroke="#7a9e2f" stroke-width="2"/>`
+      : `<polyline points="${pts}" fill="none" stroke="#2f7a9e" stroke-width="3"/>`;
+  }).join('');
+  const cur=pdfPts.length?`${pdfMode==='area'&&pdfPts.length>2
+      ?`<polygon points="${pdfPts.map(p=>p.x+','+p.y).join(' ')}" fill="rgba(200,80,60,.2)" stroke="#c0392b" stroke-width="2"/>`
+      :`<polyline points="${pdfPts.map(p=>p.x+','+p.y).join(' ')}" fill="none" stroke="#c0392b" stroke-width="2"/>`}
+    ${pdfPts.map(p=>`<circle cx="${p.x}" cy="${p.y}" r="4" fill="#c0392b"/>`).join('')}`:'';
+  svg.innerHTML=done+cur;
+}
+
+function pdfRenderResults(){
+  const el=$('#pdfResults');if(!el)return;
+  if(!pdfShapes.length){el.innerHTML='';return;}
+  el.innerHTML=`<div class="card" style="margin-top:12px">
+    <h2>Measurements</h2>
+    <table><thead><tr><th>Name</th><th>Type</th><th>Page</th><th style="text-align:right">Value</th><th></th></tr></thead>
+    <tbody>${pdfShapes.map((s,i)=>`<tr>
+      <td><input value="${esc(s.label)}" oninput="pdfShapes[${i}].label=this.value" style="width:180px"></td>
+      <td>${s.kind==='area'?'Area':'Length'}</td><td>${s.page}</td>
+      <td style="text-align:right;white-space:nowrap">${s.value.toFixed(3)} ${s.unit}</td>
+      <td><button class="btn sm danger" onclick="pdfShapes.splice(${i},1);pdfDrawOverlay();pdfRenderResults()">×</button></td>
+    </tr>`).join('')}</tbody></table>
+    <p style="font-size:12px;color:var(--gray);margin-top:8px">These come from the scale you set, so check that dimension was right before using them.</p>
+    <button class="btn brand" onclick="pdfCreateQuantification()">Create quantification from these</button>
+    <div class="err" id="pdfQErr"></div>
+  </div>`;
+}
+
+// Hand the measurements over to the normal quantification editor as line items.
+function pdfCreateQuantification(){
+  if(!pdfShapes.length)return;
+  const seedLines=pdfShapes.map(s=>({
+    description:s.label+(s.kind==='area'?' (area measured from PDF)':' (length measured from PDF)'),
+    unit:s.kind==='area'?'m2':'m',qty:Number(s.value.toFixed(3)),rate:''}));
+  setNavActive(null);
+  editorView(null,'SERVICE',{lines:seedLines,title:'Measured from PDF'});
+}
+
 // ---- page 1: Drawing Takeoff ----
 // cadParseResult is intentionally a module-level global (not reset on every cadTakeoffView()
 // call) so switching to another tab and back doesn't lose whatever's already been analyzed.
@@ -681,13 +857,14 @@ async function cadTakeoffView(){
   $('#cadSubArea').innerHTML=`
   <div class="card">
     <h2>Drawing Takeoff</h2>
-    <p style="font-size:13px;color:var(--gray);margin-bottom:12px">Upload a <b>DXF</b> file (from AutoCAD, Revit, etc — use "Save As" / "Export" and choose DXF; DWG binary files can't be read directly). The app reads the drawing's own legend/key, room outlines, and wall lines automatically, then suggests quantities. Treat results as a calculation aid — always check them against the drawing before finalizing a quantification.</p>
+    <p style="font-size:13px;color:var(--gray);margin-bottom:12px">Upload a <b>DXF</b>, <b>DWG</b> or <b>IFC</b> drawing. DXF and DWG are read as line work — the app finds the legend/key, room outlines and wall lines and suggests quantities. IFC is read as real building objects, so where the file includes rooms and base quantities the areas come straight from the model instead of being estimated. Treat results as a calculation aid — always check them against the drawing before finalizing a quantification.</p>
     <div class="row2">
       <div><label>Project Title</label><input id="cadTitle" placeholder="e.g. Block C Renovation"></div>
       <div><label>Department</label><select id="cadDept">${DEPTS.map(dp=>`<option ${dp===(me.department||DEPTS[3])?'selected':''}>${dp}</option>`).join('')}</select></div>
     </div>
-    <label>DXF File</label><input type="file" id="cadFile" accept=".dxf">
+    <label>Drawing file (.dxf, .dwg, .ifc)</label><input type="file" id="cadFile" accept=".dxf,.dwg,.ifc">
     <button class="btn brand" onclick="cadAnalyze()">Analyze Drawing</button>
+    <button class="btn" onclick="pdfMeasureView()">Measure a PDF instead</button>
     <div class="err" id="cadErr"></div>
   </div>
   <div id="cadItemsArea"></div>
@@ -697,7 +874,7 @@ async function cadTakeoffView(){
 async function cadAnalyze(){
   const f=$('#cadFile').files[0];
   $('#cadErr').textContent='';
-  if(!f){$('#cadErr').textContent='Choose a .dxf file first.';return;}
+  if(!f){$('#cadErr').textContent='Choose a .dxf, .dwg or .ifc file first.';return;}
   const fd=new FormData();fd.append('file',f);
   try{
     const r=await fetch('/api/cad/parse',{method:'POST',headers:{Authorization:'Bearer '+token},body:fd});
@@ -710,8 +887,25 @@ async function cadAnalyze(){
     cadMaterialsAll=await api('/cad/materials');
     $('#cadResultArea').innerHTML='';
     cadRenderItems();
+    cadShowIfcNotes(data);
   }catch(e){$('#cadErr').textContent=e.message;}
 }
+// IFC files vary wildly in quality. If the export left out rooms or base
+// quantities, say so plainly rather than silently returning almost nothing.
+function cadShowIfcNotes(data){
+  if(!data.ifc)return;
+  const q=data.ifc, c=q.counts||{};
+  const bad=!q.quality||!q.quality.usable;
+  const html=`<div class="card" style="border-left:4px solid ${bad?'#c0392b':'var(--brand)'}">
+    <h2 style="margin-bottom:6px">IFC file read (${esc(q.schema||'')})</h2>
+    <p style="font-size:13px;color:var(--gray);margin-bottom:8px">
+      Found ${c.spaces||0} room(s), ${c.walls||0} wall(s), ${c.doors||0} door(s), ${c.windows||0} window(s), ${c.storeys||0} storey(s).</p>
+    ${(q.notes||[]).map(n=>`<p style="font-size:13px;color:${bad?'#c0392b':'var(--gray)'};margin:4px 0">• ${esc(n)}</p>`).join('')}
+    ${bad?`<p style="font-size:13px;margin-top:10px">This file carries geometry but not the room and quantity data that makes IFC worth using. It was most likely converted from DWG, or exported without base quantities. For a full takeoff, either re-export it from the original model with rooms defined and base quantities enabled, or upload the DWG/DXF version instead.</p>`:''}
+  </div>`;
+  $('#cadResultArea').insertAdjacentHTML('afterbegin',html);
+}
+
 const CAD_DISPLAY_UNIT_FACTORS={mm:0.001,cm:0.01,m:1,ft:0.3048,in:0.0254};
 function cadRoomMaterialSelect(it,i){
   return `<select onchange="cadParseResult.items[${i}].materialId=this.value?Number(this.value):null">
