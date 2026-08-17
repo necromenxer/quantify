@@ -247,11 +247,40 @@ async function savePassword(){
   }catch(e){$('#pwMsg').className='err';$('#pwMsg').textContent=e.message;}
 }
 
+// Shown when an admin has reset this user's password: they must replace the
+// temporary one before they can use the app.
+function forcePasswordView(){
+  $('#nav').classList.add('hidden');$('#userbox').classList.remove('hidden');
+  $('#uinfo').innerHTML=`${esc(me.name)}`;
+  main.innerHTML=`<div class="card" style="max-width:460px;margin:40px auto">
+    <h2>Choose a new password</h2>
+    <p style="font-size:13px;color:var(--gray);margin-bottom:14px">An administrator reset your password. Enter the temporary password you were given, then pick a new one to continue.</p>
+    <label>Temporary password</label><input id="fpCur" type="password" autocomplete="current-password">
+    <label>New password</label><input id="fpNew" type="password" autocomplete="new-password" placeholder="at least 6 characters">
+    <label>Confirm new password</label><input id="fpNew2" type="password" autocomplete="new-password">
+    <button class="btn brand" onclick="submitForcedPassword()">Set password</button>
+    <button class="btn" onclick="logout()">Log out</button>
+    <div class="err" id="fpErr"></div>
+  </div>`;
+}
+async function submitForcedPassword(){
+  const cur=$('#fpCur').value,n1=$('#fpNew').value,n2=$('#fpNew2').value;
+  if(n1.length<6)return $('#fpErr').textContent='New password must be at least 6 characters';
+  if(n1!==n2)return $('#fpErr').textContent='The two new passwords do not match';
+  try{
+    await api('/me/password',{method:'POST',body:JSON.stringify({current:cur,next:n1})});
+    me.must_change_password=0;
+    main.innerHTML='';boot();
+  }catch(e){$('#fpErr').textContent=e.message;}
+}
+
 // ---------- shell ----------
 async function boot(){
   DEPTS=await api('/departments');
   if(token&&!me){try{me=await api('/me');}catch{logout();return;}}
   if(!me)return loginView();
+  // an admin reset this account's password — nothing else is reachable until it's changed
+  if(Number(me.must_change_password))return forcePasswordView();
   $('#nav').classList.remove('hidden');$('#userbox').classList.remove('hidden');
   $('#uinfo').innerHTML=`${esc(me.name)} · <span class="tag ${me.role}">${me.role}</span> ${esc(me.department||'')}`;
   $('#navUsers').style.display=me.role==='ADMIN'?'':'none';
@@ -1270,7 +1299,7 @@ async function cadDelMaterial(id){if(confirm('Delete this material?')){await api
 async function usersView(){
   const users=await api('/admin/users');
   main.innerHTML=`<div class="card"><h2>User Management</h2>
-  <div style="overflow-x:auto"><table style="min-width:820px"><thead><tr><th>Name</th><th>Email</th><th style="width:110px">Role</th><th style="width:200px">Department</th><th style="width:80px">Status</th><th style="width:100px"></th></tr></thead>
+  <div style="overflow-x:auto"><table style="min-width:960px"><thead><tr><th>Name</th><th>Email</th><th style="width:110px">Role</th><th style="width:200px">Department</th><th style="width:80px">Status</th><th style="width:250px"></th></tr></thead>
   <tbody>${users.map(u=>`<tr>
     <td><b>${esc(u.name)}</b></td><td>${esc(u.email)}</td>
     <td><select style="width:120px" onchange="updUser(${u.id},'role',this.value)">${['USER','ARCHITECT','MANAGER','ADMIN'].map(r=>`<option ${u.role===r?'selected':''}>${r}</option>`).join('')}</select></td>
@@ -1279,8 +1308,33 @@ async function usersView(){
     <td><div class="actions" style="white-space:nowrap">
       ${u.status!=='ACTIVE'?`<button class="btn sm brand" onclick="updUser(${u.id},'status','ACTIVE')">Approve</button>`:''}
       ${u.status==='ACTIVE'&&u.id!==me.id?`<button class="btn sm danger" onclick="updUser(${u.id},'status','DISABLED')">Disable</button>`:''}
+      <button class="btn sm" onclick="resetUserPw(${u.id},'${esc(u.name)}')">Reset password</button>
+      ${u.id!==me.id?`<button class="btn sm danger" onclick="delUser(${u.id},'${esc(u.name)}')">Delete</button>`:''}
     </div></td></tr>`).join('')}
-  </tbody></table></div></div>`;
+  </tbody></table></div>
+  <p style="font-size:12px;color:var(--gray);margin-top:10px">Reset password gives you a one-time temporary password to pass on — the user must change it as soon as they log in. Delete removes the account permanently and only works if that user has no quantifications; otherwise disable them instead.</p>
+  <div id="pwResetBox"></div></div>`;
+}
+// Admin-driven reset: the temporary password is shown once, here, and never again.
+async function resetUserPw(id,name){
+  if(!confirm(`Reset the password for ${name}?\n\nTheir current password stops working immediately and you'll be given a temporary one to pass on.`))return;
+  try{
+    const r=await api('/admin/users/'+id+'/reset-password',{method:'POST'});
+    $('#pwResetBox').innerHTML=`<div class="card" style="margin-top:12px;border:2px solid var(--brand)">
+      <h2 style="margin-bottom:6px">Temporary password for ${esc(r.name)}</h2>
+      <p style="font-size:13px;color:var(--gray);margin-bottom:10px">Give this to them now — it is shown only once and cannot be retrieved later. They'll be asked to set their own password when they log in.</p>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <code style="font-size:20px;letter-spacing:2px;padding:10px 16px;background:var(--dark);color:#fff;border-radius:6px">${esc(r.tempPassword)}</code>
+        <button class="btn sm" onclick="navigator.clipboard.writeText('${esc(r.tempPassword)}').then(()=>alert('Copied'))">Copy</button>
+        <button class="btn sm" onclick="$('#pwResetBox').innerHTML=''">Done</button>
+      </div></div>`;
+    $('#pwResetBox').scrollIntoView({behavior:'smooth',block:'nearest'});
+  }catch(e){alert(e.message);}
+}
+async function delUser(id,name){
+  if(!confirm(`Permanently delete ${name}?\n\nThis cannot be undone. If they have any quantifications the delete will be refused — disable the account instead.`))return;
+  try{await api('/admin/users/'+id,{method:'DELETE'});usersView();}
+  catch(e){alert(e.message);}
 }
 async function updUser(id,field,val){
   if(field==='status'&&val==='DISABLED'&&!confirm('Disable this user? They will no longer be able to log in.'))return usersView();
@@ -1291,7 +1345,7 @@ async function updUser(id,field,val){
 // ---------- admin activity log ----------
 async function auditView(){
   const rows=await api('/admin/audit');
-  const label={ITEM_ADD:'Added item',ITEM_EDIT:'Edited item',ITEM_DELETE:'Deleted item',QUANT_DELETE:'Deleted quantification',USER_UPDATE:'Updated user'};
+  const label={ITEM_ADD:'Added item',ITEM_EDIT:'Edited item',ITEM_DELETE:'Deleted item',QUANT_DELETE:'Deleted quantification',USER_UPDATE:'Updated user',USER_PASSWORD_RESET:'Reset user password',USER_DELETE:'Deleted user'};
   main.innerHTML=`<div class="card"><h2>Activity Log <span class="tag USER">master list &amp; admin actions</span></h2>
   <div style="max-height:560px;overflow-y:auto"><table>
   <thead><tr><th>Date &amp; Time (UTC)</th><th>User</th><th>Action</th><th>Details</th></tr></thead>
