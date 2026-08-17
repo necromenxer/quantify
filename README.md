@@ -16,6 +16,28 @@ Web app for standardized item quantifications: type an item, pick it from the ma
 - Admin item management with duplicate detection (asks before adding similar items).
 - Every user can change their own password from the top bar.
 
+## CAD Quantify — supported drawing formats
+
+| Format | How it's read | Notes |
+|---|---|---|
+| **DXF** | `dxf-parser` | Line work. Rooms, walls and symbols are inferred from geometry, layer names and the drawing's own legend. |
+| **DWG** | `@mlightcad/libredwg-web` (LibreDWG compiled to WebAssembly) | Read directly — no export to DXF needed. Converted internally to the same shape as DXF, so it goes through the identical engine. Pure npm package, nothing to install on the server. |
+| **IFC** | `web-ifc` | Read as real building objects. Where the file contains rooms and base quantities, areas come straight from the model rather than being estimated. |
+| **PDF** | measured by hand in the browser | PDFs carry no reliable units or object data, so nothing is guessed. Set the scale from a dimension you know, then trace rooms/runs. |
+
+### Getting good results from IFC
+
+IFC is only better than DXF/DWG if the export includes the right data. The file needs:
+
+- **Rooms/Spaces defined in the source model** (Revit Rooms, ArchiCAD Zones) — without these there are no `IfcSpace` objects and no room areas.
+- **Base quantities enabled** on export — this is what carries the exact areas, lengths and volumes.
+
+An IFC produced by *converting* a DWG usually has neither, and will contain geometry but no usable quantities. The app tells you when this is the case rather than silently returning very little.
+
+### A note on accuracy
+
+DXF and DWG are *drawing* formats — they store lines, not rooms. Room detection works by finding enclosed areas and reading nearby labels, so it depends on how the drawing was made. Plans drawn with closed room outlines on clearly-named layers work well; annotation-heavy sheets or drawings where rooms are only implied by wall linework may find few or no rooms. Always check results against the drawing.
+
 ## Deploy free on Render + Turso (recommended)
 
 **1. Create the database (Turso — free)**

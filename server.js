@@ -7,6 +7,8 @@ const multer = require('multer');
 const DxfParser = require('dxf-parser');
 const db = require('./db');
 const { generatePdf } = require('./pdf');
+const { FORMATS, detectFormat, parseToDxfShape } = require('./cadformats');
+const { parseIfc } = require('./cadifc');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 const app = express();
@@ -973,14 +975,108 @@ app.put('/api/cad/symbol-names', auth, wrap(async (req, res) => {
 }));
 
 // ---------- parse ----------
+// Turn an IFC read into the same response shape the takeoff page consumes.
+// IFC quantities are already in metres/m², so areas are converted up to the
+// mm-based numbers the rest of the pipeline expects (unit is reported as mm).
+async function buildIfcResponse(ifc) {
+  const allMaterials = await db.all('SELECT * FROM cad_materials');
+  const savedNames = await db.all('SELECT * FROM cad_symbol_names');
+  const savedMap = {}; savedNames.forEach(r => { savedMap[r.signature] = r.material_id; });
+  const M2_TO_MM2 = 1e6, M_TO_MM = 1e3;
+
+  const matchMaterial = (sig, label) => {
+    if (savedMap[sig]) return savedMap[sig];
+    const m = allMaterials.find(x => cadNameMatch(label, x.name));
+    return m ? m.id : null;
+  };
+
+  const items = [];
+
+  ifc.rooms.forEach((r, i) => {
+    if (r.area == null) return; // no quantity, nothing trustworthy to report
+    const sig = `IFC:SPACE:${(r.label || 'space').toUpperCase().replace(/[^A-Z0-9]+/g, '_')}:${i + 1}`;
+    const area = r.area * M2_TO_MM2;
+    items.push({
+      kind: 'ROOM', roomType: /toilet|wc|bath|rest\s*room/i.test(r.label || '') ? 'TOILET' : 'ROOM',
+      signature: sig, type: 'ROOM', layer: 'IFC', blockName: null,
+      description: `Room — "${r.label}" (from IFC)`,
+      colorName: null, colorHex: null,
+      detectedLabel: r.label, autoLabel: false, count: 0, length: 0,
+      area, grossArea: area, netArea: area,
+      vertices: null,
+      materialId: matchMaterial(sig, r.label),
+    });
+  });
+
+  // Walls are reported in aggregate: IFC wall quantities are exact, so there's
+  // no need for the perimeter-minus-openings estimation used on DXF drawings.
+  const walled = ifc.walls.filter(w => w.area != null || w.length != null);
+  if (walled.length) {
+    const totalArea = walled.reduce((s, w) => s + (w.area || 0), 0);
+    const totalLen = walled.reduce((s, w) => s + (w.length || 0), 0);
+    const sig = 'IFC:WALLS:ALL';
+    items.push({
+      kind: 'WALL', roomType: 'ROOM', signature: sig, type: 'WALL', layer: 'IFC', blockName: null,
+      description: `Walls — ${walled.length} from IFC`,
+      colorName: null, colorHex: null, detectedLabel: 'Walls (IFC)',
+      count: 0, length: 0, area: 0,
+      perimeter: Number((totalLen * M_TO_MM).toFixed(2)),
+      openingsLength: 0,
+      netWallLength: Number((totalLen * M_TO_MM).toFixed(2)),
+      heightM: totalLen > 0 ? Number((totalArea / totalLen).toFixed(3)) : 2.7,
+      materialId: matchMaterial(sig, 'wall'),
+    });
+  }
+
+  // Doors and windows are real counted objects in IFC
+  for (const [label, n] of [['Doors', ifc.counts.doors], ['Windows', ifc.counts.windows]]) {
+    if (!n) continue;
+    const sig = `IFC:${label.toUpperCase()}`;
+    items.push({
+      kind: 'SYMBOL', signature: sig, type: label.toUpperCase(), layer: 'IFC', blockName: null,
+      description: `${label} — counted from IFC`,
+      colorName: null, colorHex: null, detectedLabel: label, labelSource: 'ifc',
+      count: n, length: 0, area: 0,
+      materialId: matchMaterial(sig, label),
+    });
+  }
+
+  return {
+    items,
+    detectedUnit: 'mm',
+    legendKeyCount: 0,
+    roomCount: items.filter(i => i.kind === 'ROOM').length,
+    preview: { geometry: [], rooms: [] }, // IFC geometry is 3D; no 2D preview yet
+    source: 'IFC',
+    ifc: { schema: ifc.schema, counts: ifc.counts, quality: ifc.quality, notes: ifc.notes },
+  };
+}
+
 app.post('/api/cad/parse', auth, upload.single('file'), wrap(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  if (!/\.dxf$/i.test(req.file.originalname || '')) {
-    return res.status(400).json({ error: 'Only DXF files are supported. In your CAD software, use "Save As" / "Export" and choose DXF (ASCII) format — DWG binary files cannot be read directly.' });
+  const format = detectFormat(req.file.originalname, req.file.buffer);
+
+  if (format === FORMATS.PDF) {
+    // PDFs carry no reliable drawing units or object data, so they're measured
+    // by hand in the browser rather than parsed here.
+    return res.status(400).json({ error: 'PDF drawings are measured manually — use the "Measure a PDF" option on the Drawing Takeoff page instead of uploading it here.' });
   }
+  if (format === FORMATS.UNKNOWN) {
+    return res.status(400).json({ error: 'Unrecognised file. Upload a DXF, DWG or IFC drawing.' });
+  }
+
+  // IFC is a different kind of file: it carries real building objects, so it
+  // gets its own reader rather than being forced through the line-work engine.
+  if (format === FORMATS.IFC) {
+    let ifc;
+    try { ifc = await parseIfc(req.file.buffer); }
+    catch (e) { return res.status(400).json({ error: 'Could not read this IFC file: ' + e.message }); }
+    return res.json(await buildIfcResponse(ifc));
+  }
+
   let dxf;
-  try { dxf = new DxfParser().parseSync(req.file.buffer.toString('utf8')); }
-  catch (e) { return res.status(400).json({ error: 'Could not read this file as DXF. Make sure it was exported/saved as DXF (ASCII), not a binary DWG.' }); }
+  try { dxf = await parseToDxfShape(format, req.file.buffer); }
+  catch (e) { return res.status(400).json({ error: e.message }); }
   const entities = dxf.entities || [];
   const layerTable = (dxf.tables && dxf.tables.layer && dxf.tables.layer.layers) || {};
   const expandedEntities = cadExpandInserts(entities, dxf.blocks || {});

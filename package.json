@@ -3,8 +3,12 @@
   "version": "1.1.0",
   "description": "QuantiFy - Quick Quantification System for FDC Development Services Division. Designed and created by necromenxer.",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "express": "^4.19.0",
     "bcryptjs": "^2.4.3",
@@ -12,6 +16,8 @@
     "pdfkit": "^0.15.0",
     "@libsql/client": "^0.14.0",
     "dxf-parser": "^1.1.2",
-    "multer": "^1.4.5-lts.1"
+    "multer": "^1.4.5-lts.1",
+    "@mlightcad/libredwg-web": "^0.7.9",
+    "web-ifc": "^0.0.77"
   }
 }
